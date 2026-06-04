@@ -1,0 +1,14 @@
+# OS / editor cruft
+.DS_Store
+*.swp
+*~
+
+# logs
+*.log
+
+# Node deps if anyone vendors the Web3 examples here
+node_modules/
+
+# local test clusters / eval workspaces if created alongside the skill
+nodes-test*/
+*-workspace/
