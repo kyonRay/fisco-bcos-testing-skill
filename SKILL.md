@@ -1,27 +1,18 @@
 ---
 name: fisco-bcos-testing
 description: >-
-  Test the FISCO-BCOS blockchain (AIR single-process mode) end to end — spin up a local
-  4-node cluster, drive it with the official tooling (the Java console, java-sdk-demo stress
-  tests, build_chain auth mode, the newman/Hardhat CI suites) plus modern Ethereum tools (Viem,
-  ethers.js) and curl, send transactions from natural-language intent, exercise BOTH distinct RPC
-  services — BCOS RPC (console, tars-encoded sendTransaction) and Web3 RPC (Viem/ethers/Hardhat,
-  Ethereum-spec eth_* with RLP) — classify each test
-  point by black-box reachability (三桶 model), tamper transaction bytes to test validation, run
-  module unit-test binaries as evidence, test version-upgrade compatibility (rolling binary swap,
-  compatibility_version bump, feature-flag/hardfork gating, mixed-version no-fork, rollback), test
-  permission governance (deploy/method authorization), run stress / long-stability / performance
-  regression, and emit an evidence matrix. Use this skill WHENEVER the user wants to test
-  FISCO-BCOS, run black-box / integration / regression tests against a node, validate
-  security-audit fixes (CertiK / FIB findings), execute or operationalize a 提测 (QA handover) doc,
-  send or forge transactions via sendTransaction or eth_sendRawTransaction, check that malformed /
-  malicious input is rejected, reproduce a P2P / consensus attack, test a version upgrade or its
-  backward compatibility, toggle a feature flag / bugfix / hardfork, exercise permission governance,
-  stress-test or measure performance, or stand up a local AIR cluster — even if they don't say the
-  word "skill" or "test harness". Triggers on: "测试 FISCO-BCOS", "提测", "黑盒测试",
-  "FIB / 审计 验证", "起一条链测", "eth_sendRawTransaction 测试", "构造畸形交易", "跑 UT 当证据",
-  "版本升级 / 升级兼容", "灰度升级", "feature flag / hardfork", "权限治理", "压力测试 / 压测", "控制台",
-  "用 Viem / ethers 发交易", "BCOS RPC vs Web3 RPC", "自然语言发交易测试".
+  End-to-end FISCO-BCOS AIR testing skill: stand up a local 4-node cluster, drive BCOS RPC
+  (`console`, `sendTransaction`) and Web3 RPC (`eth_*`) with official tools, Viem, ethers.js,
+  Hardhat, curl, java-sdk-demo, build_chain auth mode, and Newman/Hardhat CI suites, and classify
+  black-box reachability vs P2P/consensus-only surfaces. Use for black-box, integration,
+  regression, audit-fix validation (CertiK/FIB), 提测/QA handover, malformed or forged transaction
+  rejection, natural-language transaction intent, sendTransaction / eth_sendRawTransaction
+  testing, permission governance, feature-flag / hardfork / compatibility_version changes, rolling
+  upgrades, mixed-version compatibility, rollback, stress / long-stability / performance
+  regression, and evidence collection including UT binaries. Triggers include: "测试 FISCO-BCOS",
+  "提测", "黑盒测试", "审计验证", "起一条链测", "构造畸形交易", "eth_sendRawTransaction 测试",
+  "版本升级 / 升级兼容", "灰度升级", "权限治理", "压力测试 / 压测", "控制台", "Viem / ethers 发交易",
+  "BCOS RPC vs Web3 RPC", "自然语言发交易测试".
 ---
 
 # FISCO-BCOS Testing (AIR mode)
