@@ -14,6 +14,13 @@
 #   [config_ini_override]    -> PROFILE_CONFIG
 set -euo pipefail
 
+# Requires bash 4+ (associative arrays). Fail clearly instead of a cryptic
+# `declare: -gA: invalid option` on stock macOS bash 3.2.
+if (( BASH_VERSINFO[0] < 4 )); then
+    echo "profile_lib.sh requires bash >= 4 (found ${BASH_VERSION}). On macOS: brew install bash." >&2
+    return 1 2>/dev/null || exit 1
+fi
+
 declare -gA PROFILE_META
 declare -gA PROFILE_GENESIS
 declare -gA PROFILE_REPLAY
