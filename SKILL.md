@@ -147,12 +147,14 @@ they don't cover is left to the exploration layer's random search (Step 6), not 
 
 ## 三 oracle
 
-Three failure signals, each judged by a pure decision function in `scripts/oracle_lib.sh`, fed by
-a live-polling wrapper:
+Three failure signals, each judged by a pure decision function — `oracle_liveness_decide` /
+`oracle_fork_decide` / `oracle_stateroot_decide` in `scripts/oracle_lib.sh`, and
+`oracle_crash_check` in `scripts/oracle_crash.sh` itself, not `oracle_lib.sh` — fed by a
+live-polling wrapper:
 
 | oracle | wrapper | decision fn | default threshold | trips on |
 |---|---|---|---|---|
-| crash | `oracle_crash.sh` | `oracle_crash_check` | `RG_HANG_SEC`=10s (RPC-hang probe), `RG_ONCE_WAIT_SEC`=2s (`--once` window) | a node PID is gone, or a core-dump file is found |
+| crash | `oracle_crash.sh` | `oracle_crash_check` | `RG_ONCE_WAIT_SEC`=2s (the `--once` window `gate.sh` actually uses); `RG_HANG_SEC`=10s (RPC-hang probe) applies only to `oracle_crash.sh`'s continuous-poll mode, which `gate.sh` never reaches | a node PID is gone, or a core-dump file is found |
 | consensus-halt | `oracle_liveness.sh` | `oracle_liveness_decide` | `RG_STALL_SEC`=30s | block height flat for longer than the threshold while transactions are pending |
 | state-mismatch | `oracle_stateroot.sh` | `oracle_stateroot_decide` | exact match, no tolerance | `stateRoot` differs across nodes at the same height |
 
