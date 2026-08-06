@@ -31,8 +31,8 @@
 #   复现输入步骤      text          failures.jsonl's "repro"
 #   证据路径          text          failures.jsonl's "evidence"
 #   关联版本          text          failures.jsonl's "version"
-#   状态              singleSelect  constant "待处理" — failures_append has no state param;
-#                                   report_defects always files a fresh defect as pending triage
+#   状态              singleSelect  constant "new" — failures_append has no state param;
+#                                   report_defects always files a fresh defect as new
 #   关联case_FIB_PR   text          "" — not tracked by failures_append; filled in manually later
 #
 # No jq dependency (matches scripts/scenarios/scenario_upgrade.sh /
@@ -116,7 +116,7 @@ _rd_record_json() {
         "$(_rd_field_text "复现输入步骤" "$repro")" \
         "$(_rd_field_text "证据路径" "$evidence")" \
         "$(_rd_field_text "关联版本" "$version")" \
-        "$(_rd_field_option "状态" "待处理")" \
+        "$(_rd_field_option "状态" "new")" \
         "$(_rd_field_text "关联case_FIB_PR" "")"
 }
 

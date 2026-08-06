@@ -39,6 +39,45 @@ else
     echo "ok: --dry-run never invoked mcporter"
 fi
 
+# 状态 must be "new" (a freshly auto-filed defect), not the old invalid "待处理" literal — and
+# every singleSelect value this run actually emitted must fall inside its live-sheet option set.
+# See tests/failures_value_labels_test.sh for the fuller regression suite (incl. gate.sh's own
+# call-site literals); this is the same check scoped to report_defects.sh's own rendering logic.
+assert_contains "$out" '"field":"状态","option_value":{"items":[{"text":"new"}]}}' "dry-run 状态 value is 'new'"
+assert_not_contains "$out" "待处理" "dry-run JSON never emits the invalid '待处理' 状态 value"
+
+_in_set() { local v="$1"; shift; local x; for x in "$@"; do [[ "$x" == "$v" ]] && return 0; done; return 1; }
+SCENARIO_FAMILIES=(ut dual_rpc malformed upgrade exploration baseline)
+ORACLES=(crash halt fork state-mismatch)
+SEVERITIES=(高 中 低)
+
+while IFS= read -r v; do
+    if _in_set "$v" "${SCENARIO_FAMILIES[@]}"; then
+        echo "ok: emitted 场景族 value '$v' is a valid option"
+    else
+        echo "FAIL: emitted 场景族 value '$v' NOT in {${SCENARIO_FAMILIES[*]}}" >&2
+        _ASSERT_FAILS=1
+    fi
+done < <(printf '%s' "$out" | grep -oE '"field":"场景族","option_value":\{"items":\[\{"text":"[^"]*"' | sed -E 's/.*"text":"([^"]*)"/\1/')
+
+while IFS= read -r v; do
+    if _in_set "$v" "${ORACLES[@]}"; then
+        echo "ok: emitted 失败信号 value '$v' is a valid option"
+    else
+        echo "FAIL: emitted 失败信号 value '$v' NOT in {${ORACLES[*]}}" >&2
+        _ASSERT_FAILS=1
+    fi
+done < <(printf '%s' "$out" | grep -oE '"field":"失败信号","option_value":\{"items":\[\{"text":"[^"]*"' | sed -E 's/.*"text":"([^"]*)"/\1/')
+
+while IFS= read -r v; do
+    if _in_set "$v" "${SEVERITIES[@]}"; then
+        echo "ok: emitted 严重级别 value '$v' is a valid option"
+    else
+        echo "FAIL: emitted 严重级别 value '$v' NOT in {${SEVERITIES[*]}}" >&2
+        _ASSERT_FAILS=1
+    fi
+done < <(printf '%s' "$out" | grep -oE '"field":"严重级别","option_value":\{"items":\[\{"text":"[^"]*"' | sed -E 's/.*"text":"([^"]*)"/\1/')
+
 # -h prints usage and never touches failures.jsonl parsing / mcporter either.
 out_h="$(PATH="$fakebin:$PATH" bash scripts/report_defects.sh -h)"
 assert_contains "$out_h" "Usage" "help text prints usage"

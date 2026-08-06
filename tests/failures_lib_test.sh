@@ -17,4 +17,11 @@ line2="$(tail -1 "$tmp/failures.jsonl")"
 assert_contains "$line2" '\"boom\"' "embedded quote escaped"
 assert_contains "$line2" '"oracle":"crash"' "second row oracle field written"
 
+# _gate_scenario_label: gate.sh's run_oracles_once phase label -> valid 场景族 option (see
+# tests/failures_value_labels_test.sh for the full value/option-set regression suite; this is
+# just the direct unit test of the normalization function itself, right where it's defined).
+assert_eq "ut" "$(_gate_scenario_label "after:ut")" "after:ut -> ut"
+assert_eq "dual_rpc" "$(_gate_scenario_label "after:dual_rpc")" "after:dual_rpc -> dual_rpc"
+assert_eq "baseline" "$(_gate_scenario_label "baseline")" "baseline passes through unchanged"
+
 assert_done

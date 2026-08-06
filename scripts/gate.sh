@@ -197,23 +197,28 @@ rpc_current_height() {
 # misreport, and no zero-arg invocation that would exit 2 before ever checking anything.
 #
 # Task 13: whenever an oracle trips, record it into <FAILURES_OUTDIR>/failures.jsonl via
-# failures_append (scripts/failures_lib.sh) — profile/scenario(phase)/oracle/severity/desc/
-# evidence, so a gate FAIL always leaves a local defect row behind even with no cloud auth
-# available. This call is local-file-only (see failures_lib.sh's own header); nothing here talks
-# to the network — that split is the whole point of Task 13's architecture.
+# failures_append (scripts/failures_lib.sh) — profile/scenario/oracle/severity/desc/evidence, so
+# a gate FAIL always leaves a local defect row behind even with no cloud auth available. This
+# call is local-file-only (see failures_lib.sh's own header); nothing here talks to the network —
+# that split is the whole point of Task 13's architecture. The `scenario` value passed to
+# failures_append is `_gate_scenario_label "$phase"`, NOT the raw phase label: the phase is
+# "baseline" or "after:<scenario>", and report_defects.sh maps `scenario` straight into 场景族, a
+# singleSelect column whose option set does not include "after:<x>" strings — only the bare
+# scenario family names (plus "baseline" itself, which is a valid option).
 run_oracles_once() {
-    local phase="$1" rc=0 height
+    local phase="$1" rc=0 height scenario_label
+    scenario_label="$(_gate_scenario_label "$phase")"
     echo ">> oracle check ($phase): crash"
     if ! bash "$SCRIPT_DIR/oracle_crash.sh" --once "${node_pids[@]}"; then
         rc=1
-        failures_append "$FAILURES_OUTDIR" "$profile_name" "$phase" "crash" "高" \
+        failures_append "$FAILURES_OUTDIR" "$profile_name" "$scenario_label" "crash" "高" \
             "oracle_crash tripped during $phase" "bash $SCRIPT_DIR/gate.sh -p $PROFILE_PATH" \
             "$NODE_DIR" "${PROFILE_GENESIS[compatibility_version]:-unknown}"
     fi
     echo ">> oracle check ($phase): liveness"
     if ! bash "$SCRIPT_DIR/oracle_liveness.sh" -r "$RPC_URL"; then
         rc=1
-        failures_append "$FAILURES_OUTDIR" "$profile_name" "$phase" "consensus-halt" "高" \
+        failures_append "$FAILURES_OUTDIR" "$profile_name" "$scenario_label" "halt" "高" \
             "oracle_liveness tripped during $phase" "bash $SCRIPT_DIR/gate.sh -p $PROFILE_PATH" \
             "$NODE_DIR" "${PROFILE_GENESIS[compatibility_version]:-unknown}"
     fi
@@ -225,7 +230,7 @@ run_oracles_once() {
         echo ">> oracle check ($phase): stateroot @ $height"
         if ! bash "$SCRIPT_DIR/oracle_stateroot.sh" -b "$height" -r "$RPC_URL"; then
             rc=1
-            failures_append "$FAILURES_OUTDIR" "$profile_name" "$phase" "state-mismatch" "高" \
+            failures_append "$FAILURES_OUTDIR" "$profile_name" "$scenario_label" "state-mismatch" "高" \
                 "oracle_stateroot tripped during $phase @ height $height" \
                 "bash $SCRIPT_DIR/gate.sh -p $PROFILE_PATH" \
                 "$NODE_DIR" "${PROFILE_GENESIS[compatibility_version]:-unknown}"

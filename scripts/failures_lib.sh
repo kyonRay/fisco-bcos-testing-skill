@@ -36,6 +36,19 @@ _failures_json_escape() {
     printf '%s' "$s"
 }
 
+# _gate_scenario_label <phase> — normalize gate.sh's oracle-check phase label into a valid
+# 场景族 (scenario family) value for the smartsheet's singleSelect option set
+# {ut, dual_rpc, malformed, upgrade, exploration, baseline}. gate.sh's run_oracles_once is called
+# once as "baseline" and once per scenario as "after:<scenario>" — the raw phase string
+# ("after:ut" etc.) is NOT a valid option, so this strips the "after:" prefix down to the bare
+# scenario family name; "baseline" itself is already a valid option and passes through
+# unchanged. Pure function, no IO — the only part of this normalization worth unit-testing on
+# its own (see tests/failures_lib_test.sh).
+_gate_scenario_label() {
+    local phase="$1"
+    printf '%s' "${phase#after:}"
+}
+
 # failures_append <outdir> <profile> <scenario> <oracle> <severity> <desc> <repro> <evidence> <version>
 # Append one JSON line to <outdir>/failures.jsonl recording a gate-detected defect:
 #   {"profile":...,"scenario":...,"oracle":...,"severity":...,"desc":...,"repro":...,
