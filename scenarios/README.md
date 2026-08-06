@@ -32,16 +32,24 @@ expect_oracle = pass
   `apply_profile.sh` to reproduce that chain locally.
 - `input` — the command the exploration layer used to trigger the failure: a console
   invocation, a curl against the Web3 RPC, a crafted transaction submission, or similar. Applied
-  verbatim via `bash -c`; `run_case.sh` does not validate or sandbox it.
-- `expect_oracle` — the expected result under the gate's three oracles (`scripts/oracle_crash.sh`,
-  `scripts/oracle_liveness.sh`, `scripts/oracle_stateroot.sh`; see `scripts/gate.sh`). One of:
-  - `pass` — none of the three oracles should trip. This is also how a "the malicious input gets
-    safely rejected" case is written: a rejected input trips no oracle, so there is no separate
-    `reject` outcome to track.
-  - `crash` / `consensus_halt` / `state_mismatch` — the named oracle is expected to trip. This is
-    how a still-open defect gets tracked as a fixture: the case is expected to keep failing its
-    own assertion until the underlying defect is fixed, at which point it is edited to
-    `expect_oracle=pass`.
+  verbatim via `bash -c`, with its exit status captured (never allowed to abort `run_case.sh`
+  itself — a nonzero exit is exactly what `expect_oracle=reject` expects); `run_case.sh` does not
+  otherwise validate or sandbox it.
+- `expect_oracle` — one of `pass` or `reject`. This is a release gate whose job is "confirm no
+  exceptions": a crash / consensus-halt / state-mismatch oracle trip (`scripts/oracle_crash.sh`,
+  `scripts/oracle_liveness.sh`, `scripts/oracle_stateroot.sh`; see `scripts/gate.sh`) is **always**
+  a case FAIL, under either value — there is no `expect_oracle` value under which a crash is an
+  expected, passing outcome.
+  - `pass` — the input is a valid operation. The case PASSES iff the input applied successfully
+    (exit 0) AND none of the three oracles trip.
+  - `reject` — the input is malformed/malicious and should be refused. The case PASSES iff the
+    input was rejected (nonzero exit) AND the node stayed alive (the crash oracle does not trip)
+    — the same false-green guard `scripts/scenarios/scenario_malformed.sh`'s `_mal_verdict` uses
+    (`rejected==1 && alive==1`): a node that crashed while "rejecting" is a FAIL, not a clean
+    reject.
+
+  `run_case.sh`'s `case_verdict` function is the single place this is decided — see its own
+  header comment for the exact logic.
 
 A missing required field, or a bad `expect_oracle` value, is an error (nonzero exit, message
 naming the file and the field) — see `run_case.sh`'s field validation, which runs before
@@ -60,20 +68,26 @@ scripts/run_case.sh --dry-run scenarios/example.case   # print profile/input/exp
 
 ## The flywheel
 
-1. **Exploration confirms a failure.** Working in the sibling `fisco-bcos-testing` or
-   `fisco-bcos-vuln-hunt` skill (or by hand), a specific input against a specific profile is
-   found to trip an oracle — a crash, a consensus halt, or a state-root mismatch — or, in the
-   defensive direction, to be safely rejected where it once wasn't.
-2. **Distill into a `.case`.** The confirmed profile + input + oracle outcome become a `.case`
+A `.case` always pins down the *correct*, post-fix behavior — never a still-open defect. A case
+that "expects a crash" would be pointless (the gate would need to keep failing on purpose); the
+regression-catch mechanism is the reverse: the case asserts the fixed behavior, and if the defect
+ever comes back, the case starts reporting `CASE: FAIL` on its own.
+
+1. **Exploration confirms a fix (or a clean rejection).** Working in the sibling
+   `fisco-bcos-testing` or `fisco-bcos-vuln-hunt` skill (or by hand), a specific input against a
+   specific profile that once tripped an oracle — a crash, a consensus halt, a state-root
+   mismatch — is confirmed fixed: the input now applies cleanly (`pass`), or a malformed/malicious
+   input is confirmed to be safely refused without taking the node down (`reject`).
+2. **Distill into a `.case`.** The confirmed profile + input + expected outcome become a `.case`
    file: `profile=` the exact `.profile` used, `input=` the exact reproducing command,
-   `expect_oracle=` what the oracle check should report.
+   `expect_oracle=pass` or `reject` per which of the two the confirmed fix landed as.
 3. **Drop it in `scenarios/`.** The file lives here permanently — it is the durable record of a
-   once-confirmed failure (or a once-fixed one still worth re-checking).
+   once-broken input now behaving correctly.
 4. **The gate re-runs it every round.** Every fixture accumulated here is meant to be swept by
    future gate rounds (today: run each with `run_case.sh` directly; wiring a `.case` sweep into
    `gate.sh` itself is a natural next step, not yet done), so a regression that was fixed once
-   cannot silently come back, and a still-open defect stays visible round over round instead of
-   being re-discovered from scratch.
+   cannot silently come back — it resurfaces as a failing case instead of being re-discovered
+   from scratch.
 
 ## `example.case`
 
