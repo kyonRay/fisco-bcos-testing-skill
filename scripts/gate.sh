@@ -155,6 +155,13 @@ profile_load "$PROFILE_PATH"
 web3_port="${PROFILE_CONFIG[web3_rpc.listen_port]:-8545}"
 RPC_URL="http://127.0.0.1:${web3_port}"
 
+# Task 13: local defect sink. failures_lib.sh is pure-local (no network — see its own header),
+# so sourcing it here does not add a cloud dependency to this real-run path; only
+# report_defects.sh (invoked separately, by the model layer) talks to the network. Failures land
+# next to the cluster's own node directories so they travel with the rest of that run's evidence.
+source "$SCRIPT_DIR/failures_lib.sh"
+FAILURES_OUTDIR="$CLUSTER_OUTDIR_ABS"
+
 # Discover live node PIDs from the cluster layout that cluster_up.sh (sibling
 # fisco-bcos-testing skill, invoked by apply_profile.sh) produces. Each node's start.sh
 # launches its fisco-bcos binary as `${SHELL_FOLDER}/../fisco-bcos ...` where SHELL_FOLDER is
@@ -188,19 +195,41 @@ rpc_current_height() {
 # below is a single command that runs to completion and returns its own exit status — there is
 # no persistent `while true` background process and therefore no teardown `kill` + `wait`=143
 # misreport, and no zero-arg invocation that would exit 2 before ever checking anything.
+#
+# Task 13: whenever an oracle trips, record it into <FAILURES_OUTDIR>/failures.jsonl via
+# failures_append (scripts/failures_lib.sh) — profile/scenario(phase)/oracle/severity/desc/
+# evidence, so a gate FAIL always leaves a local defect row behind even with no cloud auth
+# available. This call is local-file-only (see failures_lib.sh's own header); nothing here talks
+# to the network — that split is the whole point of Task 13's architecture.
 run_oracles_once() {
     local phase="$1" rc=0 height
     echo ">> oracle check ($phase): crash"
-    bash "$SCRIPT_DIR/oracle_crash.sh" --once "${node_pids[@]}" || rc=1
+    if ! bash "$SCRIPT_DIR/oracle_crash.sh" --once "${node_pids[@]}"; then
+        rc=1
+        failures_append "$FAILURES_OUTDIR" "$profile_name" "$phase" "crash" "高" \
+            "oracle_crash tripped during $phase" "bash $SCRIPT_DIR/gate.sh -p $PROFILE_PATH" \
+            "$NODE_DIR" "${PROFILE_GENESIS[compatibility_version]:-unknown}"
+    fi
     echo ">> oracle check ($phase): liveness"
-    bash "$SCRIPT_DIR/oracle_liveness.sh" -r "$RPC_URL" || rc=1
+    if ! bash "$SCRIPT_DIR/oracle_liveness.sh" -r "$RPC_URL"; then
+        rc=1
+        failures_append "$FAILURES_OUTDIR" "$profile_name" "$phase" "consensus-halt" "高" \
+            "oracle_liveness tripped during $phase" "bash $SCRIPT_DIR/gate.sh -p $PROFILE_PATH" \
+            "$NODE_DIR" "${PROFILE_GENESIS[compatibility_version]:-unknown}"
+    fi
     height="$(rpc_current_height)"
     if [[ -z "$height" ]]; then
         echo "ERROR: could not read block height from $RPC_URL for stateroot oracle ($phase)" >&2
         rc=1
     else
         echo ">> oracle check ($phase): stateroot @ $height"
-        bash "$SCRIPT_DIR/oracle_stateroot.sh" -b "$height" -r "$RPC_URL" || rc=1
+        if ! bash "$SCRIPT_DIR/oracle_stateroot.sh" -b "$height" -r "$RPC_URL"; then
+            rc=1
+            failures_append "$FAILURES_OUTDIR" "$profile_name" "$phase" "state-mismatch" "高" \
+                "oracle_stateroot tripped during $phase @ height $height" \
+                "bash $SCRIPT_DIR/gate.sh -p $PROFILE_PATH" \
+                "$NODE_DIR" "${PROFILE_GENESIS[compatibility_version]:-unknown}"
+        fi
     fi
     return $rc
 }
