@@ -20,8 +20,13 @@
 #
 # Real-run (no --dry-run; needs a live fisco-bcos binary — NOT exercised by this skill's own
 # tests, since there is no binary in this environment):
-#   1. apply_profile.sh brings up the cluster and replays the profile onto it.
-#   2. Oracle monitoring (crash / consensus-halt / state-mismatch) starts in the background.
+#   1. apply_profile.sh brings up the cluster and replays the profile onto it; node PIDs and the
+#      Web3 RPC URL are then discovered from the cluster's on-disk layout (see the discovery
+#      block below — this is a documented assumption about that layout, verified only against a
+#      live chain).
+#   2. The three oracles run as ONE-SHOT checks (never a persistent background process) — once
+#      as a baseline right after bring-up, and once again after each scenario. Each call runs to
+#      completion and its real exit status is aggregated into oracle_tripped.
 #   3. Each requested scenario name is looked up in GATE_SCENARIOS and run in turn; a name
 #      with no registered function (i.e. its Task 7-10 scenario file hasn't been added yet,
 #      or simply wasn't sourced) is reported as a skip, not a crash.
@@ -64,7 +69,12 @@ DRY_RUN=0
 args=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --scenarios) SCENARIOS_RAW="$2"; shift 2 ;;
+        --scenarios)
+            # MINOR #1 fix: guard against --scenarios being the last token — reading $2
+            # unconditionally under `set -u` would abort with a raw "unbound variable"
+            # instead of a clean usage error.
+            [[ $# -ge 2 ]] || { echo "ERROR: --scenarios requires a value (comma-separated names). -h for help." >&2; exit 2; }
+            SCENARIOS_RAW="$2"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
         *) args+=("$1"); shift ;;
     esac
@@ -88,6 +98,15 @@ profile_name="${profile_base%.*}"
 # Resolve the requested scenario list: --scenarios a,b,c, or every known scenario by default.
 if [[ -n "$SCENARIOS_RAW" ]]; then
     IFS=',' read -r -a scenario_list <<< "$SCENARIOS_RAW"
+    # MINOR #2 fix: trim leading/trailing whitespace from each name so
+    # `--scenarios "ut, dual_rpc"` doesn't yield a " dual_rpc" element that fails the
+    # known-scenario check with a confusing (leading-space) name in the error message.
+    for i in "${!scenario_list[@]}"; do
+        name="${scenario_list[$i]}"
+        name="${name#"${name%%[![:space:]]*}"}"
+        name="${name%"${name##*[![:space:]]}"}"
+        scenario_list[$i]="$name"
+    done
 else
     read -r -a scenario_list <<< "$GATE_KNOWN_SCENARIOS"
 fi
@@ -118,17 +137,77 @@ fi
 APPLY_PROFILE="$SCRIPT_DIR/apply_profile.sh"
 [[ -f "$APPLY_PROFILE" ]] || { echo "ERROR: apply_profile.sh not found at $APPLY_PROFILE" >&2; exit 1; }
 
-echo ">> [1/4] apply_profile (needs live chain): bringing up cluster for $profile_name"
-bash "$APPLY_PROFILE" -p "$PROFILE_PATH"
+CLUSTER_OUTDIR="./nodes-release-gate"
 
-echo ">> [2/4] starting oracle monitoring in background (needs live chain)"
-oracle_pids=()
-for oracle in oracle_crash oracle_liveness oracle_stateroot; do
-    oracle_script="$SCRIPT_DIR/${oracle}.sh"
-    [[ -f "$oracle_script" ]] || continue
-    bash "$oracle_script" &
-    oracle_pids+=("$!")
-done
+echo ">> [1/4] apply_profile (needs live chain): bringing up cluster for $profile_name"
+bash "$APPLY_PROFILE" -p "$PROFILE_PATH" -o "$CLUSTER_OUTDIR"
+
+CLUSTER_OUTDIR_ABS="$(cd "$CLUSTER_OUTDIR" && pwd)"
+NODE_DIR="$CLUSTER_OUTDIR_ABS/127.0.0.1"
+
+# RPC URL: read straight from the profile's own [config_ini_override] web3_rpc.listen_port
+# (apply_profile.sh patches this into every node's config.ini), falling back to the AIR
+# default of 8545. Reusing profile_lib.sh here is a documented assumption that the profile
+# already parsed successfully once by apply_profile.sh above — verified only against a live
+# chain, not by this task's own (dry-run-only) tests.
+source "$SCRIPT_DIR/profile_lib.sh"
+profile_load "$PROFILE_PATH"
+web3_port="${PROFILE_CONFIG[web3_rpc.listen_port]:-8545}"
+RPC_URL="http://127.0.0.1:${web3_port}"
+
+# Discover live node PIDs from the cluster layout that cluster_up.sh (sibling
+# fisco-bcos-testing skill, invoked by apply_profile.sh) produces. Each node's start.sh
+# launches its fisco-bcos binary as `${SHELL_FOLDER}/../fisco-bcos ...` where SHELL_FOLDER is
+# the node's own absolute dir under NODE_DIR — so every live node process's command line
+# contains the NODE_DIR path, and `pgrep -f` against it finds them all. This is a documented
+# assumption about that process-launch layout, verified only against a live chain — CRITICAL
+# #1/#2 fix: unlike the old "background the oracle scripts, kill+wait at teardown" model, PID
+# discovery happens once, up front, and feeds bounded one-shot oracle calls below instead.
+mapfile -t node_pids < <(pgrep -f "$NODE_DIR/" 2>/dev/null || true)
+if [[ ${#node_pids[@]} -eq 0 ]]; then
+    echo "ERROR: could not discover any live fisco-bcos node PIDs under $NODE_DIR — apply_profile.sh may not have brought up a chain, or the cluster_up.sh process-launch layout has changed. Real-run requires a live chain; refusing to silently continue with no crash-oracle PIDs." >&2
+    exit 1
+fi
+echo ">> discovered node PIDs: ${node_pids[*]}"
+
+# rpc_current_height — print the current block height as decimal, or empty string on failure.
+# Duplicates oracle_liveness.sh's private rpc_block_number rather than sourcing it, to keep
+# this orchestrator from depending on that script's internal (non-interface) function names.
+rpc_current_height() {
+    local resp hex
+    resp="$(curl -sS -m 10 -H 'Content-Type: application/json' \
+        -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
+        "$RPC_URL" 2>/dev/null)" || { echo ""; return; }
+    hex="$(printf '%s' "$resp" | sed -n 's/.*"result":"\(0x[0-9a-fA-F]*\)".*/\1/p')"
+    [[ -z "$hex" ]] && { echo ""; return; }
+    printf '%d\n' "$hex"
+}
+
+# run_oracles_once <phase-label> — one bounded pass of all three oracles for the given phase,
+# aggregating their real exit codes. CRITICAL #1/#2 fix, restated: every oracle invocation
+# below is a single command that runs to completion and returns its own exit status — there is
+# no persistent `while true` background process and therefore no teardown `kill` + `wait`=143
+# misreport, and no zero-arg invocation that would exit 2 before ever checking anything.
+run_oracles_once() {
+    local phase="$1" rc=0 height
+    echo ">> oracle check ($phase): crash"
+    bash "$SCRIPT_DIR/oracle_crash.sh" --once "${node_pids[@]}" || rc=1
+    echo ">> oracle check ($phase): liveness"
+    bash "$SCRIPT_DIR/oracle_liveness.sh" -r "$RPC_URL" || rc=1
+    height="$(rpc_current_height)"
+    if [[ -z "$height" ]]; then
+        echo "ERROR: could not read block height from $RPC_URL for stateroot oracle ($phase)" >&2
+        rc=1
+    else
+        echo ">> oracle check ($phase): stateroot @ $height"
+        bash "$SCRIPT_DIR/oracle_stateroot.sh" -b "$height" -r "$RPC_URL" || rc=1
+    fi
+    return $rc
+}
+
+echo ">> [2/4] baseline oracle check (needs live chain)"
+oracle_tripped=0
+run_oracles_once "baseline" || oracle_tripped=1
 
 echo ">> [3/4] running scenarios: ${scenario_list[*]}"
 scenario_failed=0
@@ -145,14 +224,11 @@ for name in "${scenario_list[@]}"; do
         echo "-- scenario '$name' FAILED"
         scenario_failed=1
     fi
+    run_oracles_once "after:$name" || oracle_tripped=1
 done
 
 echo ">> [4/4] tearing down cluster (needs live chain)"
-oracle_tripped=0
-for pid in "${oracle_pids[@]+"${oracle_pids[@]}"}"; do
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || oracle_tripped=1
-done
+bash "$NODE_DIR/stop_all.sh" || true
 
 if [[ "$oracle_tripped" == 1 || "$scenario_failed" == 1 ]]; then
     echo "GATE: FAIL (oracle_tripped=$oracle_tripped scenario_failed=$scenario_failed)"
