@@ -84,6 +84,16 @@ scenario — `_upg_no_fork` in `scripts/scenarios/scenario_upgrade.sh` duplicate
 than sourcing it. Treat it as a tested building block available for a future multi-node stateroot
 wrapper, not as wired-in today.
 
+**GAP, stated plainly**: through `gate.sh`'s default sweep, 2 of the 3 oracles (crash,
+consensus-halt) get a real chance to fire; state-mismatch does not, because a real cross-node
+comparison needs per-node RPC discovery that `gate.sh`'s single `-r "$RPC_URL"` call doesn't do
+(see above — `oracle_stateroot_decide` needs ≥2 URLs to compare anything, and `gate.sh` only ever
+passes one). Today the only place a real state-mismatch check runs is `scenario_upgrade.sh`'s
+T2-T4 `_upg_no_fork` check (3 nodes' individual BCOS RPC ports, sampled after each binary swap) —
+and since `gate.sh`'s bare-dispatch loop SKIPs `upgrade` by default (see `GATE_SCENARIOS_NEEDS_ARGS`
+in `gate.sh`), even that only runs when `scenario_upgrade_run` is invoked directly, not as part of
+a bare `gate.sh -p <profile>` sweep.
+
 ## Explicitly not an oracle: grepping logs for `ERROR`
 
 Deliberately excluded — noisy, false-positive-prone. Evidence (including logs) is still preserved

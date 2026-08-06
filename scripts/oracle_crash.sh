@@ -80,6 +80,11 @@ oracle_crash_check() {
             found=1
             continue
         fi
+        # NOTE: these three paths are relative to $PWD (plus the fixed /cores/ on macOS) — this
+        # scan only finds a core file when this script happens to run from the node's own dir,
+        # which `gate.sh` does not guarantee (it invokes oracle_crash.sh from its own cwd, not
+        # from $NODE_DIR). The `kill -0` disappearance check above is cwd-independent and is the
+        # load-bearing half of this oracle; the core-dump half below is best-effort on top of it.
         for core in "core.$pid" core /cores/core."$pid"; do
             if [[ -f "$core" ]]; then
                 echo "CRASH: core dump found for pid $pid ($core)"

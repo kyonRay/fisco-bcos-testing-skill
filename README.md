@@ -154,10 +154,11 @@ fisco-bcos-release-gate/
 - **Facts don't get baked in.** Methodology is fixed; per-release facts (feature-flag names, exact
   line numbers, current version strings) are re-derived at run time — grep `Features.cpp`, run
   `listSystemConfigs`, read the current `config.genesis` — never hardcoded into a script or doc.
-- **Stated accurately, not aspirationally.** Known gaps (`gate.sh` doesn't sweep `--scenarios
-  upgrade`'s args automatically; `gate.sh` doesn't auto-replay `scenarios/*.case`;
-  `cluster_up.sh` has no `compatibility_version` passthrough yet) are documented as current state
-  in `SKILL.md`, not silently worked around or claimed fixed.
+- **Stated accurately, not aspirationally.** Known gaps (`gate.sh`'s default sweep SKIPs `upgrade`
+  rather than failing on its missing args — it needs old/new binaries + a target version `gate.sh`
+  can't supply bare, so it's driven directly instead; `gate.sh` doesn't auto-replay
+  `scenarios/*.case`; `cluster_up.sh` has no `compatibility_version` passthrough yet) are
+  documented as current state in `SKILL.md`, not silently worked around or claimed fixed.
 
 ---
 

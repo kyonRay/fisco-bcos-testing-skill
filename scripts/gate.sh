@@ -29,7 +29,12 @@
 #      completion and its real exit status is aggregated into oracle_tripped.
 #   3. Each requested scenario name is looked up in GATE_SCENARIOS and run in turn; a name
 #      with no registered function (i.e. its Task 7-10 scenario file hasn't been added yet,
-#      or simply wasn't sourced) is reported as a skip, not a crash.
+#      or simply wasn't sourced) is reported as a skip, not a crash. 'upgrade' is ALSO skipped
+#      here (not run, not failed) even once registered: its scenario_upgrade_run needs
+#      <outdir> <old_bin> <new_bin> <target_ver>, which this bare-dispatch loop cannot supply —
+#      run it directly (source scripts/scenarios/scenario_upgrade.sh; call scenario_upgrade_run
+#      yourself, see SKILL.md / references/upgrade-path.md). This keeps the DEFAULT scenario
+#      sweep (GATE_KNOWN_SCENARIOS = all four names) able to reach GATE: PASS on a healthy chain.
 #   4. The cluster is torn down.
 #   5. Exit code aggregates: any oracle trip OR any scenario failure -> non-zero.
 set -euo pipefail
@@ -47,6 +52,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # on scripts/scenarios/*.sh having been written yet — Tasks 7-10 add those files one at a time,
 # and this list already knows all four names up front.
 GATE_KNOWN_SCENARIOS="ut dual_rpc malformed upgrade"
+
+# GATE_SCENARIOS_NEEDS_ARGS: scenario names whose registered function cannot be dispatched bare
+# ("$fn" with zero arguments) the way every other scenario is — today only 'upgrade'
+# (scenario_upgrade_run <outdir> <old_bin> <new_bin> <target_ver>; see scripts/scenarios/
+# scenario_upgrade.sh's own header and references/upgrade-path.md). A name in this set is a valid
+# GATE_KNOWN_SCENARIOS entry (validated by --dry-run, reachable via a direct scenario_upgrade_run
+# call — see SKILL.md) but is SKIPped, not run, by the real-run bare-dispatch loop below, and is
+# flagged in --dry-run output too so this is visible without a live chain. Declared up front (pure
+# data, no live-chain dependency) so both --dry-run and the real-run loop read the same set.
+# Without this, the default (`--scenarios` omitted) sweep — the documented canonical
+# `gate.sh -p <profile>` command — always included 'upgrade', which failed its missing-arg check
+# every time and turned GATE: PASS into GATE: FAIL even on a healthy chain.
+declare -A GATE_SCENARIOS_NEEDS_ARGS=([upgrade]=1)
 
 # name -> function map, filled by conditionally sourcing scripts/scenarios/*.sh below. Empty
 # (and that's fine) until Tasks 7-10 add scenario files.
@@ -126,6 +144,9 @@ if [[ "$DRY_RUN" == 1 ]]; then
     echo "profile: $profile_name"
     for name in "${scenario_list[@]}"; do
         echo "scenario: $name"
+        if [[ -n "${GATE_SCENARIOS_NEEDS_ARGS[$name]:-}" ]]; then
+            echo "  needs-args: $name is SKIPped by the default bare-dispatch loop (requires old/new binaries + target version) — run it directly, see SKILL.md"
+        fi
     done
     exit 0
 fi
@@ -245,10 +266,17 @@ run_oracles_once "baseline" || oracle_tripped=1
 
 echo ">> [3/4] running scenarios: ${scenario_list[*]}"
 scenario_failed=0
+
+# GATE_SCENARIOS_NEEDS_ARGS is declared up front, alongside GATE_KNOWN_SCENARIOS — see that
+# declaration's comment for what this set means and why it exists.
 for name in "${scenario_list[@]}"; do
     fn="${GATE_SCENARIOS[$name]:-}"
     if [[ -z "$fn" ]]; then
         echo "SKIP: scenario '$name' has no registered function (not implemented yet)"
+        continue
+    fi
+    if [[ -n "${GATE_SCENARIOS_NEEDS_ARGS[$name]:-}" ]]; then
+        echo "SKIP: $name requires old/new binaries + target version — run it directly, see SKILL.md (source scripts/scenarios/scenario_$name.sh; ${fn} <outdir> <old_bin> <new_bin> <target_ver>)"
         continue
     fi
     echo "-- running scenario: $name"

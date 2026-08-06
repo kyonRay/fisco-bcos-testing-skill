@@ -23,15 +23,22 @@
 # tests/scenario_dual_rpc_test.sh; SCENARIO_DRY=1 makes it print the steps it would take instead
 # of sending anything, which IS exercised.
 #
-# Both RPC paths deploy the SAME trivial "always returns 42" EVM bytecode — no Solidity compile,
-# no ABI encoding needed, since the deployed contract ignores calldata entirely:
-#   init code:    600a600c600039600a6000f3
-#   runtime code: 602a60005260206000f3
-#     PUSH1 0x2a; PUSH1 0x00; MSTORE; PUSH1 0x20; PUSH1 0x00; RETURN
-# Any call to the deployed contract returns 0x...002a (42) regardless of calldata. This keeps the
-# scenario a minimal deploy+call ("cleanliness over completeness" — this whole path is live-only
-# and unverifiable in a checkout with no running chain) while still giving both RPC paths a
-# directly comparable expected return value.
+# The two RPC paths do NOT deploy the same bytecode — they exercise the two flows independently,
+# per rpc-paths.md's own point that the two RPCs are not interchangeable:
+#   - BCOS RPC path (_drpc_bcos_deploy_and_call): deploys BCOS_CONTRACT_NAME (default "HelloWorld",
+#     the console's bundled demo contract) via `console.sh deploy`, calls its set(42), then get(),
+#     and asserts the round-tripped value.
+#   - Web3 RPC path (_drpc_web3_deploy_and_call): deploys the raw trivial "always returns 42" EVM
+#     bytecode below via a hand-signed eth_sendRawTransaction — no Solidity compile, no ABI
+#     encoding needed, since the deployed contract ignores calldata entirely:
+#       init code:    600a600c600039600a6000f3
+#       runtime code: 602a60005260206000f3
+#         PUSH1 0x2a; PUSH1 0x00; MSTORE; PUSH1 0x20; PUSH1 0x00; RETURN
+#     Any call to the deployed contract returns 0x...002a (42) regardless of calldata.
+# Each path's own pure assertion functions (_drpc_assert_receipt/_drpc_assert_return) check that
+# path's own expected value (BCOS RPC: get() == "42"; Web3 RPC: eth_call == "0x2a") — the two flows
+# are compared only indirectly, via the stateRoot cross-check below, not via a shared expected
+# return value.
 #
 # Env:
 #   SCENARIO_DRY=1        print the steps that would run against each RPC and return 0 without

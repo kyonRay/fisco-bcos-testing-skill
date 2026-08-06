@@ -119,8 +119,10 @@ Four scenario families (`GATE_KNOWN_SCENARIOS` in `gate.sh`; each lives in
 | `malformed` | `scenario_malformed.sh` | byte-tampers a signed tx, injects it, asserts a *clean* rejection rather than a crash masquerading as one | crash (false-green guard) |
 | `upgrade` | `scenario_upgrade.sh` | replays the T0–T8 version-upgrade timeline: rolling binary swap, `compatibility_version` bump, bugfix-flag flip assertion | all three |
 
-**Weighting per profile** (every profile runs all four families for real — never a smoke pass;
-the difference is depth on `upgrade` and whether the exploration layer attaches):
+**Weighting per profile** (every profile still gets all four families run for real, never a smoke
+pass — `gate.sh -p <profile>` covers `ut`/`dual_rpc`/`malformed`; `upgrade` is driven directly per
+the note below, since `gate.sh`'s own bare-dispatch loop SKIPs it. The difference across profiles
+is depth on `upgrade` and whether the exploration layer attaches):
 
 - `production-enterprise`: full T0–T8 timeline against real old/new binaries, **plus** the
   exploration layer (Step 6).
@@ -129,14 +131,19 @@ the difference is depth on `upgrade` and whether the exploration layer attaches)
   `malformed` at full depth, `upgrade` run at that profile's own compat version, no exploration
   layer attached.
 
-**Known gap — the `upgrade` scenario's arguments.** `scenario_upgrade_run`'s real signature is
-`scenario_upgrade_run <outdir> <old_bin> <new_bin> <target_ver>`, but `gate.sh`'s dispatch loop
-calls every registered scenario function bare (no arguments). Driving `--scenarios upgrade`
-through `gate.sh` as written will fail on missing arguments — that passthrough is not wired yet.
-Until it is, when driving the upgrade scenario, source `scripts/scenarios/scenario_upgrade.sh`
-directly and call `scenario_upgrade_run` yourself with the cluster outdir, the old (current
-production) binary, the new (release-candidate) binary, and the target `compatibility_version`
-string.
+**`upgrade` is opt-in — the default sweep SKIPs it, on purpose.** `scenario_upgrade_run`'s real
+signature is `scenario_upgrade_run <outdir> <old_bin> <new_bin> <target_ver>`, but `gate.sh`'s
+real-run dispatch loop calls every registered scenario function bare (no arguments) — it cannot
+supply those four. So `gate.sh`'s bare-dispatch loop SKIPs `upgrade` (not run, not failed; see
+`GATE_SCENARIOS_NEEDS_ARGS` in `gate.sh`) even when it's in the requested scenario list, which it
+is by default. This means the canonical headline command, `gate.sh -p <profile>` with no
+`--scenarios` flag, runs `ut` / `dual_rpc` / `malformed` for real and reaches `GATE: PASS` on a
+healthy chain — `upgrade` no longer silently fails that run. `upgrade` stays a valid
+`GATE_KNOWN_SCENARIOS` entry (so `--scenarios upgrade --dry-run` still validates it, and
+`--dry-run` on the default set prints a `needs-args:` line naming it) — to actually drive it,
+source `scripts/scenarios/scenario_upgrade.sh` directly and call `scenario_upgrade_run` yourself
+with the cluster outdir, the old (current production) binary, the new (release-candidate) binary,
+and the target `compatibility_version` string.
 
 Use `gate.sh -p <profile> --dry-run` first — it validates every requested scenario name against
 `GATE_KNOWN_SCENARIOS` and prints the resolved plan with no chain touched.
@@ -162,6 +169,11 @@ All three run as bounded, one-shot checks — never a persistent background poll
 baseline right after cluster bring-up, then again after every scenario (`gate.sh`'s
 `run_oracles_once`). Any trip, on any call, fails the whole gate round and appends one row to
 `failures.jsonl` (see 报告).
+
+**GAP**: through `gate.sh`'s own sweep, only crash and consensus-halt actually get a chance to
+fire for real — state-mismatch needs per-node RPC discovery that `gate.sh`'s single `-r "$RPC_URL"`
+call doesn't do. See `references/oracle-detection.md`'s state-mismatch section for the mechanism
+and the one place a real cross-node comparison does run today.
 
 **Explicitly not an oracle**: grepping logs for `ERROR`. It is noisy and false-positive-prone, so
 it is deliberately excluded from the pass/fail judgment — though failure evidence (including logs)

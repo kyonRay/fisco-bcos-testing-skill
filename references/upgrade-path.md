@@ -15,12 +15,15 @@ anything not covered here.
 scenario_upgrade_run <outdir> <old_bin> <new_bin> <target_ver>
 ```
 
-**`gate.sh`'s scenario dispatch loop calls every registered function bare — `"$fn"` with zero
-arguments** (see `gate.sh`'s `for name in "${scenario_list[@]}"; do fn="${GATE_SCENARIOS[$name]}";
-"$fn"; done`). `scenario_upgrade_run` defaults all four params to empty/`.` and, outside
-`SCENARIO_DRY=1`, immediately fails the missing-arg check. **Driving `--scenarios upgrade` through
-`gate.sh` as written today does not work.** Until that passthrough is wired (not yet — see
-SKILL.md's "Known gap — the `upgrade` scenario's arguments"), source the file directly:
+**`gate.sh`'s real-run scenario dispatch loop calls every registered function bare — `"$fn"` with
+zero arguments** (see `gate.sh`'s dispatch loop). `scenario_upgrade_run` defaults all four params
+to empty/`.` and, outside `SCENARIO_DRY=1`, immediately fails the missing-arg check — the bare loop
+has no way to supply `<old_bin>`/`<new_bin>`/`<target_ver>`. So `gate.sh` SKIPs `upgrade` in that
+loop instead of running it into a guaranteed failure (`GATE_SCENARIOS_NEEDS_ARGS` in `gate.sh`; see
+also SKILL.md's "`upgrade` is opt-in" note) — this keeps the default `gate.sh -p <profile>` sweep
+able to reach `GATE: PASS` on a healthy chain. **Driving `--scenarios upgrade` through `gate.sh`
+does not execute the T0-T8 timeline** — it is always SKIPped there; to actually run it, source the
+file directly:
 
 ```bash
 source scripts/scenarios/scenario_upgrade.sh
