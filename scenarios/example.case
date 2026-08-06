@@ -1,0 +1,6 @@
+# Example regression case — a flywheel fixture, not a captured production incident. Demonstrates
+# the .case format; see scenarios/README.md for the field reference and the flywheel flow.
+[case]
+profile = profiles/default-latest.profile
+input = console.sh call HelloWorld get
+expect_oracle = pass
