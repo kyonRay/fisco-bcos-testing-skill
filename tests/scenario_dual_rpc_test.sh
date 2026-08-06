@@ -26,4 +26,13 @@ assert_eq "0" "$rc" "_drpc_assert_return: matching value (0x2a,0x2a) returns suc
 if _drpc_assert_return 0x00 0x2a; then rc=0; else rc=1; fi
 assert_eq "1" "$rc" "_drpc_assert_return: mismatched value (0x00,0x2a) returns failure"
 
+# SCENARIO_DRY=1 lists the steps it would take against each RPC without sending anything — no
+# live chain needed, so this branch (unlike scenario_dual_rpc_run's real-run branch) IS hermetic
+# and safe to exercise here. Mirrors scenario_ut_test.sh's own dry-output assertion style.
+out="$(SCENARIO_DRY=1 scenario_dual_rpc_run /tmp/x)"
+assert_contains "$out" "BCOS RPC" "dry output lists the BCOS RPC step"
+assert_contains "$out" "Web3 RPC" "dry output lists the Web3 RPC step"
+assert_contains "$out" "oracle_stateroot_decide" "dry output lists the stateRoot cross-check step"
+assert_not_contains "$out" "ERROR" "dry output reports no errors (confirms nothing was actually sent)"
+
 assert_done

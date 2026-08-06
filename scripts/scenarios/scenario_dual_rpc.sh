@@ -55,13 +55,14 @@
 # best-effort assumption, not a verified contract.
 
 SCENARIO_DRPC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCENARIO_DRPC_ORACLE_LIB="$SCENARIO_DRPC_DIR/../oracle_lib.sh"
 
-# oracle_lib.sh is a library file meant to be sourced by a script that already sets
-# `set -euo pipefail` itself (its own header says so) — same pattern oracle_stateroot.sh and
-# gate.sh already use for profile_lib.sh/oracle_lib.sh. Both of this file's own sourcing contexts
-# (gate.sh, tests/scenario_dual_rpc_test.sh) already set those options before sourcing us, so
-# this is a no-op on shell state there, not a new side effect.
-source "$SCENARIO_DRPC_DIR/../oracle_lib.sh"
+# oracle_lib.sh is NOT sourced here at file scope: it sets `set -euo pipefail` itself, and doing
+# that at file scope here would mean merely SOURCING this scenario file (what gate.sh's scenario
+# loop and tests/scenario_dual_rpc_test.sh both do) mutates the sourcing script's own shell
+# options — exactly the thing this file's header says it must not do. Instead
+# scenario_dual_rpc_run sources it lazily, only on its real (non-dry) run branch, where that
+# option change is expected and harmless (gate.sh's real-run already has those options set).
 
 # ---------------------------------------------------------------------------
 # Pure comparison functions — no IO. The only part of this file unit-tested by
@@ -89,14 +90,23 @@ _drpc_assert_return() {
 # IO helpers — live-chain-only, never called from SCENARIO_DRY=1 or from this repo's tests.
 # ---------------------------------------------------------------------------
 
-# _drpc_rpc_call <url> <method> <json_params_array> — one JSON-RPC POST, print the raw response.
-# Shared shape for both RPC surfaces (they differ only in method names / param conventions, not
-# transport — both are plain HTTP JSON-RPC, per rpc-paths.md).
+# _drpc_rpc_call <url> <method> <json_params_array> — one JSON-RPC POST, print the raw response
+# on stdout. Shared shape for both RPC surfaces (they differ only in method names / param
+# conventions, not transport — both are plain HTTP JSON-RPC, per rpc-paths.md). Checks curl's own
+# exit status (connection refused, timeout, ...) and reports that as a clear diagnostic on stderr
+# — rather than letting a curl failure surface only indirectly, several calls later, as a generic
+# downstream "could not parse ..." with no indication the RPC was ever unreachable.
 _drpc_rpc_call() {
-    local url="$1" method="$2" params="$3"
-    curl -sS -m 10 -H 'Content-Type: application/json' \
+    local url="$1" method="$2" params="$3" out rc
+    out="$(curl -sS -m 10 -H 'Content-Type: application/json' \
         -d "{\"jsonrpc\":\"2.0\",\"method\":\"$method\",\"params\":$params,\"id\":1}" \
-        "$url" 2>/dev/null
+        "$url" 2>/dev/null)"
+    rc=$?
+    if [[ $rc -ne 0 ]]; then
+        echo "ERROR: scenario_dual_rpc: curl failed (exit $rc) calling $method at $url" >&2
+        return 1
+    fi
+    printf '%s' "$out"
 }
 
 # _drpc_json_hexfield <json> <field> — pull a "field":"0x..." value out of a JSON-RPC response
@@ -134,23 +144,37 @@ _drpc_console() {
 }
 
 # _drpc_bcos_deploy_and_call <outdir> — BCOS RPC path: deploy the demo contract via the console,
-# call it, verify receipt status + return value with the pure functions above. Prints the block
-# height its call transaction landed at (for the stateRoot sample), on stdout as the last line.
+# call it, verify receipt status + return value with the pure functions above. Prints ONLY the
+# bare block height integer its call transaction landed at, on stdout — that's this function's
+# return contract (scenario_dual_rpc_run captures it via command substitution for the stateRoot
+# cross-check). Every human-progress/OK/diagnostic line therefore goes to STDERR (`>&2`, piped
+# through `tee -a "$log" >&2` where it's also logged) — NEVER to stdout, or the caller's
+# `bcos_height="$(_drpc_bcos_deploy_and_call ...)"` would capture multi-line text instead of an
+# integer and the `$(( ))` height-comparison arithmetic downstream would crash under `set -e`.
 _drpc_bcos_deploy_and_call() {
-    local outdir="$1" log="$outdir/dual_rpc_bcos.log"
+    # NOTE: outdir and log are declared in separate `local` statements deliberately — `local
+    # outdir="$1" log="$outdir/x"` expands ALL of a single `local` statement's RHS values before
+    # any of that statement's names are declared, so `$outdir` in the second assignment would
+    # reference an outer-scope (unbound, under `set -u`) variable, not the one just assigned on
+    # its left. Verified live: that exact pattern throws "outdir: unbound variable" under -u.
+    local outdir="$1"
+    local log="$outdir/dual_rpc_bcos.log"
     local deploy_out addr status height got
 
-    echo ">> scenario_dual_rpc: BCOS RPC (console, :${BCOS_RPC_URL:-http://127.0.0.1:20200}): deploy ${BCOS_CONTRACT_NAME:-HelloWorld}" | tee -a "$log"
+    echo ">> scenario_dual_rpc: BCOS RPC (console, :${BCOS_RPC_URL:-http://127.0.0.1:20200}): deploy ${BCOS_CONTRACT_NAME:-HelloWorld}" | tee -a "$log" >&2
     deploy_out="$(_drpc_console deploy "${BCOS_CONTRACT_NAME:-HelloWorld}")"
     echo "$deploy_out" >> "$log"
     addr="$(printf '%s' "$deploy_out" | grep -oE '0x[0-9a-fA-F]{40}' | head -n1)"
     [[ -n "$addr" ]] || { echo "ERROR: scenario_dual_rpc: could not parse deployed contract address from console output" >&2; return 1; }
 
-    echo ">> scenario_dual_rpc: BCOS RPC: call set(42) on $addr" | tee -a "$log"
+    echo ">> scenario_dual_rpc: BCOS RPC: call set(42) on $addr" | tee -a "$log" >&2
     local call_out
     call_out="$(_drpc_console call "${BCOS_CONTRACT_NAME:-HelloWorld}" "$addr" set 42)"
     echo "$call_out" >> "$log"
-    status="$(printf '%s' "$call_out" | sed -n 's/.*status[^0-9x]*\(0x[0-9a-fA-F]\+\|[0-9]\+\).*/\1/p' | head -n1)"
+    # -E (extended regex), not BRE `\+`/`\(...\)`/`\|` — BSD/macOS sed's basic-regex mode does
+    # not support `\+` (a GNU extension) and silently matches nothing instead of erroring, which
+    # is how this line first shipped broken; verified live against both GNU and BSD sed with -E.
+    status="$(printf '%s' "$call_out" | sed -E -n 's/.*status[^0-9x]*(0x[0-9a-fA-F]+|[0-9]+).*/\1/p' | head -n1)"
     [[ -n "$status" ]] || { echo "ERROR: scenario_dual_rpc: could not parse a status field from console call output" | tee -a "$log" >&2; return 1; }
     status="$((status))"
     if ! _drpc_assert_receipt "$status" 0; then
@@ -158,22 +182,25 @@ _drpc_bcos_deploy_and_call() {
         return 1
     fi
 
-    echo ">> scenario_dual_rpc: BCOS RPC: call get() on $addr" | tee -a "$log"
+    echo ">> scenario_dual_rpc: BCOS RPC: call get() on $addr" | tee -a "$log" >&2
     got="$(_drpc_console call "${BCOS_CONTRACT_NAME:-HelloWorld}" "$addr" get | tail -n1 | tr -d '[:space:]')"
     if ! _drpc_assert_return "$got" "42"; then
         echo "FAIL: scenario_dual_rpc: BCOS RPC get() returned '$got', expected '42'" | tee -a "$log" >&2
         return 1
     fi
-    echo "OK: scenario_dual_rpc: BCOS RPC path (status=0 return=42)" | tee -a "$log"
+    echo "OK: scenario_dual_rpc: BCOS RPC path (status=0 return=42)" | tee -a "$log" >&2
 
-    height="$(printf '%s' "$call_out" | sed -n 's/.*block number[^0-9]*\([0-9]\+\).*/\1/p' | head -n1)"
+    height="$(printf '%s' "$call_out" | sed -E -n 's/.*block number[^0-9]*([0-9]+).*/\1/p' | head -n1)"
+    [[ -n "$height" ]] || { echo "ERROR: scenario_dual_rpc: could not parse block number from console call output" | tee -a "$log" >&2; return 1; }
     echo "$height"
 }
 
 # _drpc_web3_deploy_and_call <outdir> — Web3 RPC path: sign+submit the "return 42" bytecode via
 # curl eth_sendRawTransaction, verify receipt status, then eth_call the deployed address and
-# verify the return value with the pure functions above. Prints the block height its deploy
-# transaction landed at (for the stateRoot sample), on stdout as the last line.
+# verify the return value with the pure functions above. Prints ONLY the bare block height
+# integer its deploy transaction landed at, on stdout — same return contract as
+# _drpc_bcos_deploy_and_call above (see that function's docstring for why every
+# progress/OK/diagnostic line below is routed to STDERR instead).
 #
 # Signing needs a real secp256k1 signature + RLP encoding — genuinely not something to hand-roll
 # in bash. This shells out to Viem (already the sibling skill's own recommended tool for building
@@ -181,7 +208,11 @@ _drpc_bcos_deploy_and_call() {
 # eth_sendRawTransaction submission per this scenario's own design (brief Step 3). Requires
 # `node` + `npm i viem` available on PATH — a real run must have both.
 _drpc_web3_deploy_and_call() {
-    local outdir="$1" log="$outdir/dual_rpc_web3.log"
+    # See _drpc_bcos_deploy_and_call's NOTE above: outdir/log must stay two separate `local`
+    # statements, not `local outdir="$1" log="$outdir/x"` in one, or `$outdir` in the second
+    # assignment is unbound under `set -u`.
+    local outdir="$1"
+    local log="$outdir/dual_rpc_web3.log"
     local url="${WEB3_RPC_URL:-http://127.0.0.1:8545}"
     local initcode="600a600c600039600a6000f3602a60005260206000f3"
     local nonce chain_id gas_price raw resp tx_hash receipt status addr call_resp got height
@@ -192,7 +223,7 @@ _drpc_web3_deploy_and_call() {
     chain_id="$(_drpc_json_hexfield "$(_drpc_rpc_call "$url" eth_chainId "[]")" result)"
     gas_price="$(_drpc_json_hexfield "$(_drpc_rpc_call "$url" eth_gasPrice "[]")" result)"
 
-    echo ">> scenario_dual_rpc: Web3 RPC ($url): sign+deploy 'return 42' bytecode" | tee -a "$log"
+    echo ">> scenario_dual_rpc: Web3 RPC ($url): sign+deploy 'return 42' bytecode" | tee -a "$log" >&2
     raw="$(_drpc_web3_sign "" "0x$initcode" "$nonce" "$chain_id" "$gas_price")"
     resp="$(_drpc_rpc_call "$url" eth_sendRawTransaction "[\"$raw\"]")"
     tx_hash="$(_drpc_json_hexfield "$resp" result)"
@@ -211,14 +242,14 @@ _drpc_web3_deploy_and_call() {
     [[ -n "$height" ]] || { echo "ERROR: scenario_dual_rpc: could not parse blockNumber from Web3 receipt: $receipt" | tee -a "$log" >&2; return 1; }
     height="$((height))"
 
-    echo ">> scenario_dual_rpc: Web3 RPC: eth_call $addr" | tee -a "$log"
+    echo ">> scenario_dual_rpc: Web3 RPC: eth_call $addr" | tee -a "$log" >&2
     call_resp="$(_drpc_rpc_call "$url" eth_call "[{\"to\":\"$addr\",\"data\":\"0x\"},\"latest\"]")"
     got="$(_drpc_json_hexfield "$call_resp" result | sed -E 's/^0x0*/0x/')"
     if ! _drpc_assert_return "$got" "0x2a"; then
         echo "FAIL: scenario_dual_rpc: Web3 RPC eth_call returned '$got', expected '0x2a'" | tee -a "$log" >&2
         return 1
     fi
-    echo "OK: scenario_dual_rpc: Web3 RPC path (status=1 return=0x2a)" | tee -a "$log"
+    echo "OK: scenario_dual_rpc: Web3 RPC path (status=1 return=0x2a)" | tee -a "$log" >&2
     echo "$height"
 }
 
@@ -274,6 +305,10 @@ scenario_dual_rpc_run() {
         _drpc_dry
         return 0
     fi
+
+    # Sourced here, not at file scope — see the SCENARIO_DRPC_ORACLE_LIB comment above. Only
+    # reached on a real run, never by SCENARIO_DRY=1 or by merely sourcing this file.
+    source "$SCENARIO_DRPC_ORACLE_LIB"
 
     mkdir -p "$outdir"
 
