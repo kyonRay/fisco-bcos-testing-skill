@@ -14,3 +14,4 @@ nodes-test*/
 # gate run output (jsonl records, scratch)
 *.jsonl
 /tmp/
+.superpowers/
