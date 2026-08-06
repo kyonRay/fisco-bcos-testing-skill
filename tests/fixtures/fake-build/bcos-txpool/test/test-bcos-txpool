@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Fixture stub — stands in for a built module UT binary so scenario_ut_test.sh's
+# module-discovery glob (build/bcos-*/test/test-bcos-*) has something deterministic to find,
+# independent of whether the real FISCO-BCOS build/ tree exists or has finished building.
+# Never actually invoked by the dry-run path this test exercises.
+exit 0

@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Fixture stub — see tests/fixtures/fake-build/bcos-txpool/test/test-bcos-txpool for rationale.
+exit 0
