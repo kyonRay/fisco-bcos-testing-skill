@@ -12,4 +12,9 @@ assert_contains() {  # haystack needle msg
         echo "FAIL: $3 — [$1] does not contain [$2]" >&2; _ASSERT_FAILS=1
     else echo "ok: $3"; fi
 }
+assert_not_contains() {  # haystack needle msg
+    if [[ "$1" == *"$2"* ]]; then
+        echo "FAIL: $3 — [$1] contains [$2]" >&2; _ASSERT_FAILS=1
+    else echo "ok: $3"; fi
+}
 assert_done() { [[ $_ASSERT_FAILS -eq 0 ]] || { echo "TESTS FAILED" >&2; exit 1; }; echo "ALL PASS"; }

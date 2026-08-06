@@ -99,9 +99,11 @@ CLUSTER_UP="$SCRIPT_DIR/../../fisco-bcos-testing/scripts/cluster_up.sh"
 }
 
 echo ">> [1/4] cluster_up (needs live chain): build_chain + start_all into $OUTDIR"
-# NOTE: cluster_up.sh does not currently expose a compatibility_version passthrough to
-# build_chain -v; the genesis compat version in this profile ($genesis_compat) is applied
-# best-effort. Extending cluster_up.sh's flag surface is out of this task's scope.
+# GAP: cluster_up.sh has no compatibility_version passthrough to build_chain -v, so the
+# genesis compat version in this profile ($genesis_compat) is NOT applied here — the local
+# chain starts at build_chain's own default until a later `console setSystemConfigByKey
+# compatibility_version $genesis_compat` bumps it. Wiring the passthrough is out of this
+# task's scope (it belongs to whichever task owns the sibling cluster_up.sh).
 bash "$CLUSTER_UP" -o "$OUTDIR"
 NODE_DIR="$OUTDIR/127.0.0.1"
 
@@ -114,7 +116,13 @@ while read -r pair; do
     key="${fullkey#*.}"
     for cfg in "$NODE_DIR"/node*/config.ini; do
         [[ -f "$cfg" ]] || continue
-        perl -0pi -e "s/(\[\Q$section\E\][^\[]*?\n\s*\Q$key\E\s*=\s*)\S+/\${1}$value/s" "$cfg"
+        # Pass section/key/value via env instead of interpolating them into the perl source
+        # text (a value containing '/', '$', '@', or a quote would otherwise corrupt the
+        # source or prematurely close the s/// delimiter). {} delimiters sidestep the '/'
+        # that can legitimately appear in a config value (e.g. a path).
+        SECTION="$section" KEY="$key" VALUE="$value" perl -0pi -e '
+            s{(\[\Q$ENV{SECTION}\E\][^\[]*?\n\s*\Q$ENV{KEY}\E\s*=\s*)\S+}{$1$ENV{VALUE}}s;
+        ' "$cfg"
     done
 done < <(profile_config_pairs)
 
