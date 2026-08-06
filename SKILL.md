@@ -232,3 +232,20 @@ At the end of a gate round (or an exploration session), assemble:
      (`file_id=ZgGaGJqoseMl`, `sheet_id=t00i2h`) via the `tencent-docs` skill's `mcporter call
      tencent-docs smartsheet.add_records`, then marks those rows `reported:true` with their
      `record_id` locally so the same defect is never pushed twice.
+
+## Bundled resources
+
+| File | When to read |
+|------|--------------|
+| `scripts/apply_profile.sh` | replay a captured `.profile` onto a local AIR cluster |
+| `scripts/gate.sh` | the deterministic-gate orchestrator: bring up cluster, run scenarios, judge oracles |
+| `scripts/profile_lib.sh` | `.profile` parser (`profile_load` → `PROFILE_*` arrays) |
+| `scripts/oracle_lib.sh` / `oracle_crash.sh` / `oracle_liveness.sh` / `oracle_stateroot.sh` | the three failure oracles |
+| `scripts/run_case.sh` | replay one `scenarios/*.case` regression fixture |
+| `scripts/failures_lib.sh` / `report_defects.sh` | local defect sink + Tencent smartsheet sync (报告) |
+| `scripts/scenarios/scenario_ut.sh` / `scenario_dual_rpc.sh` / `scenario_malformed.sh` / `scenario_upgrade.sh` | the four gate scenario families (gate 四场景族) |
+| `profiles/*.profile` | the 6 hand-maintained config profiles (加载 profile) |
+| `scenarios/*.case` | regression fixtures distilled from confirmed exploration-layer findings (飞轮沉淀) |
+| `references/oracle-detection.md` | 三 oracle: decision logic, default thresholds, how to tune `RG_STALL_SEC` / `RG_ONCE_WAIT_SEC` / `RG_HANG_SEC` |
+| `references/profile-authoring.md` | 加载 profile: how to hand-capture a new production `.profile` from `listSystemConfigs` + `config.genesis` + `config.ini` |
+| `references/upgrade-path.md` | gate 四场景族's `upgrade` row: T0-T8 operational detail, assertion points, and the `scenario_upgrade_run` arg-passing gap |
