@@ -108,7 +108,10 @@ live chain required — the live-chain IO paths in each script are exercised onl
   the script's own header comment block via `grep '^#' "$0" | sed 's/^# \{0,1\}//'` (every script
   under `scripts/` follows this convention — match it in any new one). Reuse `tests/assert.sh`
   (`assert_eq`, `assert_contains`, `assert_done`) for pure-function unit tests rather than adding a
-  second assertion helper. A file meant to be sourced (not executed), like `profile_lib.sh` or a
-  `scripts/scenarios/scenario_*.sh` family, must not `set -e`/`set -u` at file scope — that would
-  change the sourcing script's own shell options; guard any `declare -gA` registration the same
-  way `scenario_upgrade.sh` and its siblings do.
+  second assertion helper. A `scripts/scenarios/scenario_*.sh` family file is sourced by `gate.sh`
+  (not executed on its own) and must not `set -e`/`set -u` at file scope — that would change the
+  sourcing script's own shell options; guard any `declare -gA` registration the same way
+  `scenario_upgrade.sh` and its siblings do. This does not extend to every sourced file: library
+  files that are always sourced into an already-`set -euo pipefail` caller, like `profile_lib.sh`
+  and `oracle_lib.sh`, keep `set -euo pipefail` at their own file scope too — check a given file's
+  actual header before assuming either convention.

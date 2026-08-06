@@ -73,16 +73,13 @@ live... not creation-time genesis constants"). Capture them from the console:
 
 This dumps `Config | Value | Enable Block` for every known key. For each row where `Value` is
 **not** `null`/`0` (i.e. actually active — see `references/upgrade-path.md` on reading this
-table), add one `key = value` line under `[system_config_replay]`. `production-enterprise.profile`
-has 13 such pairs, e.g. `feature_balance = 1`, `tx_gas_limit = 3000000`, `web3_chain_id = 60600`.
-Only capture what's actually set — do not invent a full flag inventory padded with zeros;
-`profile_replay_pairs` only ever emits what's present, and `apply_profile.sh`'s dry-run
-explicitly documents "flags absent from the profile are never invented or emitted."
-
-If `compatibility_version` itself was bumped post-genesis (a chain that started at one version and
-was later upgraded live), that bump is a `[system_config_replay]` entry too, distinct from the
-`[genesis]` value captured in Step 2 — `production-enterprise.profile` has none because that chain
-has stayed on its genesis version.
+table), add one `key = value` line under `[system_config_replay]`, e.g. `feature_balance = 1`,
+`tx_gas_limit = 3000000`, `web3_chain_id = 60600`. Don't trust a hardcoded pair count — re-derive
+`production-enterprise.profile`'s own with `sed -n '/\[system_config_replay\]/,/\[config_ini_override\]/p'
+profiles/production-enterprise.profile | grep -c '='`. Only capture what's actually set; don't pad
+with zeros — `apply_profile.sh`'s dry-run documents "flags absent from the profile are never
+invented or emitted." A post-genesis `compatibility_version` bump belongs here too, distinct from
+the `[genesis]` value from Step 2 — `production-enterprise.profile` has none (stayed on genesis).
 
 ## Step 4 — `[config_ini_override]`
 
