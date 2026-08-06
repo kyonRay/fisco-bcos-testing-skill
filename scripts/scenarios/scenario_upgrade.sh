@@ -137,17 +137,47 @@ _upg_find_repo_root() {
 # Features.cpp's setUpgradeFeatures() activates for <target_ver> (e.g. "3.17.0"), by locating that
 # version's `{.to = protocol::BlockVersion::V3_17_0_VERSION, .flags = {...}}` entry in the
 # upgradeRoadmap table and extracting every `Flag::<name>` token up to (but not including) the
-# next `.to = protocol::BlockVersion::` entry, or end of table if it's the last one. Prints
-# nothing (not an error) if <target_ver> has no entry in the table at all — an upgrade to a
-# version that introduces no new bugfix/feature flags is a legitimate case, not a failure.
+# next `.to = protocol::BlockVersion::` entry, or end of table if it's the last one.
+#
+# Return code is the caller's ONLY way to tell "this version legitimately introduces zero new
+# flags" (exit 0, empty stdout) apart from "flag derivation is broken" (exit 1, empty stdout) —
+# both used to print nothing, which let a broken derivation slip past T6 as a vacuous pass (a
+# false-green a review caught). So:
+#   - target_ver not shaped like x.y.z                                -> ERROR, exit 1
+#   - features_cpp missing                                             -> ERROR, exit 1
+#   - target_ver's token has NO `.to = protocol::BlockVersion::` entry
+#     in the table at all (unknown version, or the table was
+#     restructured upstream and this grep/awk no longer matches it)    -> ERROR, exit 1
+#   - target_ver's entry EXISTS but its own .flags = {} is empty       -> exit 0, empty stdout
+#     (a genuinely flag-less release — legitimate, not an error)
 _upg_target_flags() {
     local target_ver="$1"
     local features_cpp="$2"
+
+    # MINOR: reject a malformed target_ver up front. Without this, e.g. "3.17" (missing the
+    # patch component) builds tok="V3_17_VERSION", which can never match the real
+    # "V3_17_0_VERSION" table entry and would otherwise only surface via the generic
+    # not-found-in-table error below — still correct after that fix, but this gives a clearer,
+    # earlier diagnostic for the actual mistake (wrong version string, not a missing table entry).
+    if [[ ! "$target_ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "ERROR: scenario_upgrade: target_ver '$target_ver' is not a x.y.z version string" >&2
+        return 1
+    fi
+
     local tok="V${target_ver//./_}_VERSION"
     [[ -f "$features_cpp" ]] || {
         echo "ERROR: scenario_upgrade: Features.cpp not found at $features_cpp" >&2
         return 1
     }
+
+    # IMPORTANT: distinguish "not in the table at all" from "in the table with zero flags" BEFORE
+    # running the extraction awk — grep -F (fixed string, no regex metachar surprises from tok)
+    # against the literal "BlockVersion::<tok>," pattern every upgradeRoadmap entry uses.
+    if ! grep -qF "BlockVersion::${tok}," "$features_cpp"; then
+        echo "ERROR: scenario_upgrade: target version $target_ver (token $tok) has NO entry in $features_cpp's upgradeRoadmap table — flag derivation cannot proceed (unknown/malformed target_ver, or the table was restructured upstream and this script's parser is stale)" >&2
+        return 1
+    fi
+
     awk -v tok="$tok" '
         /\.to = protocol::BlockVersion::/ {
             if (grabbing) { exit }
@@ -280,11 +310,23 @@ _upg_swap_node_binary() {
 # _upg_target_flags (file-read-only, no network) so the printed T6 step is not a placeholder.
 _upg_dry() {
     local old_bin="$1" new_bin="$2" target_ver="$3"
-    local repo_root features_cpp flags_str="(unresolved)"
+    local repo_root features_cpp flags_str="(repo root not found — cannot resolve)"
     if repo_root="$(_upg_find_repo_root)"; then
         features_cpp="$repo_root/bcos-framework/bcos-framework/ledger/Features.cpp"
-        flags_str="$(_upg_target_flags "$target_ver" "$features_cpp" 2>/dev/null | tr '\n' ' ')"
-        [[ -n "$flags_str" ]] || flags_str="(none for $target_ver)"
+        # Capture via plain command substitution (NOT a pipe) so $? below is
+        # _upg_target_flags's own exit status, not tr's — see the IMPORTANT-finding fix in
+        # scenario_upgrade_run's real-run path for why this distinction matters: "not in the
+        # table" (error) and "in the table with zero flags" (benign) must not both read as "none".
+        local flags_output flags_rc
+        flags_output="$(_upg_target_flags "$target_ver" "$features_cpp" 2>&1)"
+        flags_rc=$?
+        if [[ $flags_rc -ne 0 ]]; then
+            flags_str="UNRESOLVED — $flags_output"
+        elif [[ -z "$flags_output" ]]; then
+            flags_str="(confirmed: $target_ver is in the table, zero new flags)"
+        else
+            flags_str="$(printf '%s' "$flags_output" | tr '\n' ' ')"
+        fi
     fi
     echo "DRY: scenario_upgrade: T0 reproduce prod: apply_profile.sh -p profiles/production-enterprise.profile"
     echo "DRY: scenario_upgrade: T1 baseline gate: one-shot crash/liveness/stateroot oracle pass; snapshot pre-bump value of each target flag"
@@ -329,10 +371,25 @@ scenario_upgrade_run() {
         return 1
     }
     local features_cpp="$repo_root/bcos-framework/bcos-framework/ledger/Features.cpp"
+    # IMPORTANT fix: capture via plain command substitution, NOT `mapfile < <(...)`. Process
+    # substitution decouples the producer's exit status from the reading command — `mapfile`
+    # itself returns 0 even when _upg_target_flags failed loudly (e.g. target_ver has no entry in
+    # the upgradeRoadmap table at all), so the old `mapfile ... || return 1` never actually fired
+    # on that failure: it silently fell through to "0 flags found" and let T6 vacuously pass. A
+    # plain `"$(...)"` command substitution's $? IS _upg_target_flags's own exit status.
+    local flags_output flags_rc
+    flags_output="$(_upg_target_flags "$target_ver" "$features_cpp")"
+    flags_rc=$?
+    if [[ $flags_rc -ne 0 ]]; then
+        echo "ERROR: scenario_upgrade: flag derivation failed for target version $target_ver (see ERROR above) — refusing to run T6 against an unverifiable flag set" >&2
+        return 1
+    fi
     local -a flags=()
-    mapfile -t flags < <(_upg_target_flags "$target_ver" "$features_cpp") || return 1
+    if [[ -n "$flags_output" ]]; then
+        mapfile -t flags <<<"$flags_output"
+    fi
     if [[ ${#flags[@]} -eq 0 ]]; then
-        echo "NOTE: scenario_upgrade: target version $target_ver activates no new bugfix/feature flags per $features_cpp — T6 will have nothing to assert"
+        echo "NOTE: scenario_upgrade: target version $target_ver is confirmed present in $features_cpp's upgradeRoadmap table but activates no new bugfix/feature flags — T6 will have nothing to assert (this is a benign confirmed case, not a derivation failure)"
     fi
 
     mkdir -p "$outdir"
@@ -376,7 +433,17 @@ scenario_upgrade_run() {
 
     echo "-- scenario_upgrade: T1 baseline gate"
     local t1_rc=0
-    _upg_run_oracle_triad "T1-baseline" "$rpc_url" "${pids[@]}" || t1_rc=1
+    # CRITICAL fix: a T1 failure must independently fail the whole scenario (rc=1) here, not
+    # merely be recorded into t1_rc for the T7-vs-T1 comparison below. Previously t1_rc only ever
+    # influenced the outcome via `[[ "$t1_rc" == 0 && "$t7_rc" != 0 ]]` — which is FALSE whenever
+    # T1 itself already failed, so that branch's `else` printed "OK: T7 consistent with T1" and rc
+    # stayed 0 even with a live crash/consensus-halt/state-mismatch present at (or caused by) the
+    # very start of the upgrade. That is exactly the false-green this scenario exists to catch.
+    if ! _upg_run_oracle_triad "T1-baseline" "$rpc_url" "${pids[@]}"; then
+        echo "FAIL: scenario_upgrade: T1 baseline gate failed (chain unhealthy before/at the start of the upgrade)" >&2
+        rc=1
+        t1_rc=1
+    fi
     local flag before_vals=()
     # ${flags[@]+"${flags[@]}"} rather than a bare "${flags[@]}": on bash < 4.4, expanding an
     # array with zero elements under `set -u` (the caller's shell options during a real gate.sh
@@ -447,9 +514,14 @@ scenario_upgrade_run() {
     else
         _upg_run_oracle_triad "T7-rerun" "$rpc_url" "${pids[@]}" || t7_rc=1
     fi
+    # This is an ADDITIONAL signal on top of T1's own independent pass/fail check above (T1
+    # failing already set rc=1 there, regardless of what T7 does) — it specifically catches a
+    # regression the upgrade itself introduced (T1 was healthy, T7 is not).
     if [[ "$t1_rc" == 0 && "$t7_rc" != 0 ]]; then
         echo "FAIL: scenario_upgrade: T7 regressed vs T1 baseline (T1 passed, T7 failed)" >&2
         rc=1
+    elif [[ "$t1_rc" != 0 ]]; then
+        echo "NOTE: scenario_upgrade: T7=$t7_rc — T1 already failed above, which alone already fails this scenario"
     else
         echo "OK: scenario_upgrade: T7 consistent with T1 (T1=$t1_rc T7=$t7_rc)"
     fi

@@ -59,6 +59,24 @@ if [[ -f "$features_cpp" ]]; then
 
     out2="$(_upg_target_flags 3.16.4 "$features_cpp")"
     assert_eq "bugfix_revert_logs" "$out2" "_upg_target_flags(3.16.4): exactly the single flag that version's table entry lists"
+
+    # False-green-closed proof (review finding, IMPORTANT): a version with NO entry at all in the
+    # upgradeRoadmap table must be a loud ERROR (exit != 0), NOT the same "empty stdout" a
+    # genuinely flag-less release produces — before this fix both cases were indistinguishable to
+    # the caller and a broken/stale derivation would let T6 vacuously pass. 9.9.9 does not exist
+    # in the real table (and never will, by construction of this test using a fictional version).
+    if out3="$(_upg_target_flags 9.9.9 "$features_cpp" 2>&1)"; then rc=0; else rc=1; fi
+    assert_eq "1" "$rc" "_upg_target_flags(9.9.9): unknown version (not in the table at all) -> ERROR, not silent empty-success"
+    assert_contains "$out3" "NO entry" "_upg_target_flags(9.9.9): error message says NOT in the table (distinguishing it from a benign zero-flags version)"
+    assert_eq "" "$(_upg_target_flags 3.17.0 "$features_cpp" 2>&1 1>/dev/null)" "_upg_target_flags(3.17.0) sanity: no stderr noise on a genuinely known/successful version"
+
+    # False-green-closed proof (review finding, MINOR): a malformed target_ver (missing the patch
+    # component) must be rejected up front with a clear diagnostic, not silently degrade into a
+    # token that can never match any real table entry and only surface via the generic
+    # not-found-in-table path above.
+    if out4="$(_upg_target_flags 3.17 "$features_cpp" 2>&1)"; then rc=0; else rc=1; fi
+    assert_eq "1" "$rc" "_upg_target_flags(3.17): malformed version (missing patch component) -> ERROR"
+    assert_contains "$out4" "not a x.y.z version string" "_upg_target_flags(3.17): error message names the actual problem (bad shape), not a table miss"
 else
     echo "SKIP: Features.cpp not found at $features_cpp (not inside a full FISCO-BCOS checkout) — skipping _upg_target_flags live-source assertions"
 fi
@@ -74,5 +92,14 @@ assert_contains "$out" "compatibility_version 3.17.0" "dry output lists the T5 v
 assert_contains "$out" "_upg_flag_flipped" "dry output lists the T6 flag-flip check"
 assert_contains "$out" "T8" "dry output lists the optional T8 rollback step"
 assert_not_contains "$out" "ERROR" "dry output reports no errors (confirms nothing was actually sent)"
+
+# False-green-closed proof, DRY-mode counterpart: a bad target_ver's T6 line must surface the
+# UNRESOLVED/ERROR text from _upg_target_flags, not misreport it as "(none for 9.9.9)" the way the
+# pre-fix _upg_dry did (it discarded _upg_target_flags's stderr and exit code entirely).
+if [[ -f "$features_cpp" ]]; then
+    out_bad="$(SCENARIO_DRY=1 scenario_upgrade_run /tmp/x /tmp/old-bin /tmp/new-bin 9.9.9)"
+    assert_contains "$out_bad" "UNRESOLVED" "dry output for an unknown target_ver (9.9.9) surfaces UNRESOLVED, not a silent 'none'"
+    assert_not_contains "$out_bad" "(none for" "dry output for an unknown target_ver does NOT use the benign zero-flags phrasing"
+fi
 
 assert_done
