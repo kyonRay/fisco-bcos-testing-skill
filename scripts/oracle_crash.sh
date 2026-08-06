@@ -20,14 +20,27 @@
 #           needs a deterministic window to observe the death, rather than
 #           racing an instantaneous kill -0 against process teardown.
 #
-# Detects, per PID:
+# Detects, per PID, exactly two signals (see oracle_crash_check — this is
+# the full extent of what it checks, not a summary of a larger mechanism):
 #   - process disappearance (kill -0 fails and it's not just a permissions issue)
-#   - exit code 134 (SIGABRT convention: 128+6) when the PID was spawned as a
-#     job of this shell and its wait status is available
 #   - a core dump file matching core* / core.<pid> in the cwd or /cores (macOS)
 # Plus one RPC liveness probe (curl :8545, timeout RG_HANG_SEC default 10s) to
 # distinguish "process alive but RPC hung" from "process crashed outright" —
 # a hang is reported but is not by itself a crash verdict.
+#
+# NOT implemented, and not applicable to how this oracle is actually used:
+# there is no exit-code/SIGABRT(134) check via shell `wait` status. That only
+# works for a PID that is a direct job of *this* shell; in a real gate run
+# the node PIDs come from start_all.sh, so this script never has a `wait`-able
+# child to inspect. Do not add one on that basis.
+#
+# Known gap this leaves: a SIGABRT'd-but-unreaped zombie still answers
+# `kill -0` (it's not gone yet), and with core dumps disabled (`ulimit -c 0`,
+# common in CI/production) there is no core file either — so a real abort can
+# slip past both checks here. For that failure mode, an ASan/TSan build (this
+# skill's optional hardening layer) is the sharper signal: it aborts loudly
+# and synchronously at the faulting instruction rather than relying on this
+# oracle to notice the aftermath.
 #
 # Exit status: non-zero when a crash was detected for any PID.
 set -euo pipefail
