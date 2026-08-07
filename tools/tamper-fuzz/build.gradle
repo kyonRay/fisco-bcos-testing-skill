@@ -1,0 +1,42 @@
+// tamper-fuzz: Gradle build for the TAMPER_HELPER fat jar. Uses the java-sdk JNI tars
+// encode/sign path (org.fisco.bcos.sdk.jni.utilities.tx) to produce validly-signed-over-malformed
+// and bad-signature tampered FISCO-BCOS transactions for scenario_malformed.sh to inject.
+plugins {
+    id 'java'
+    id 'com.github.johnrengelman.shadow' version '8.1.1'
+}
+
+group = 'fisco.tamperfuzz'
+version = '1.0.0'
+
+repositories {
+    mavenLocal()
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'org.fisco-bcos.java-sdk:fisco-bcos-java-sdk:3.9.0-SNAPSHOT'
+    implementation 'org.fisco-bcos:bcos-sdk-jni:3.7.0'
+}
+
+// Compile with the local JDK 21 toolchain but target bytecode 8 so the fat jar runs unchanged
+// under the remote gate host's Java 8 (the JNI native lib extracted from bcos-sdk-jni is
+// per-platform, not per-bytecode-version, so this is the only compatibility knob that matters).
+tasks.withType(JavaCompile).configureEach {
+    options.release = 8
+}
+
+tasks.named('shadowJar') {
+    archiveBaseName = 'tamper-fuzz'
+    archiveClassifier = 'all'
+    archiveVersion = ''
+    manifest {
+        attributes 'Main-Class': 'fisco.tamperfuzz.TamperFuzz'
+    }
+}
+
+tasks.named('jar') {
+    manifest {
+        attributes 'Main-Class': 'fisco.tamperfuzz.TamperFuzz'
+    }
+}

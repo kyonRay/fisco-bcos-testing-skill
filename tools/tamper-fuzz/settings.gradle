@@ -1,0 +1,2 @@
+// tamper-fuzz: standalone Gradle build, not part of any enclosing multi-project build.
+rootProject.name = 'tamper-fuzz'

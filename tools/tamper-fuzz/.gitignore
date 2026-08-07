@@ -1,0 +1,6 @@
+# Build output — the shadow fat jar is ~56 MB; never commit it. Rebuild with ./gradlew shadowJar.
+build/
+.gradle/
+
+# Keep the Gradle wrapper itself tracked (gradle/wrapper/gradle-wrapper.jar + .properties)
+# so the tool builds without a system gradle — do NOT ignore it.
