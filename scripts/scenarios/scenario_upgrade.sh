@@ -200,9 +200,23 @@ _upg_console() {
 # _upg_get_config_value <key> — console getSystemConfigByKey <key>, print the trimmed last
 # non-empty line (see header GAP note on console output parsing).
 _upg_get_config_value() {
-    local key="$1" out
-    out="$(_upg_console getSystemConfigByKey "$key" 2>/dev/null)"
-    printf '%s' "$out" | tail -n1 | tr -d '[:space:]'
+    local key="$1" out val
+    # Read through listSystemConfigs, NOT getSystemConfigByKey. Two live-run reasons:
+    #   1. A bugfix flag that has never been set has no entry, and getSystemConfigByKey answers
+    #      {"code":3008,"msg":"Entry: bugfix_auth_check does not exists!"} instead of a value —
+    #      but the pre-bump snapshot is exactly the case T6 needs to read.
+    #   2. listSystemConfigs prints one table row per key, "| bugfix_auth_check | null | 0 |",
+    #      which covers set and unset alike.
+    # The previous `tail -n1` also could not have worked either way: the console closes its output
+    # with "}" and a blank line, so every flag read back as "}" and T6 compared "}" to "}" — the
+    # same trailing-line trap scenario_dual_rpc's get() fell into.
+    out="$(_upg_console listSystemConfigs 2>/dev/null)"
+    val="$(printf '%s' "$out" | awk -F'|' -v k="$key" '
+        {
+            gsub(/^[ \t]+|[ \t]+$/, "", $2)
+            if ($2 == k) { gsub(/^[ \t]+|[ \t]+$/, "", $3); print $3; exit }
+        }')"
+    printf '%s' "$val" | tr -d '[:space:]'
 }
 
 # _upg_discover_pids — print live fisco-bcos node PIDs, one per line, discovered via pgrep against
@@ -392,7 +406,11 @@ scenario_upgrade_run() {
         echo "NOTE: scenario_upgrade: target version $target_ver is confirmed present in $features_cpp's upgradeRoadmap table but activates no new bugfix/feature flags — T6 will have nothing to assert (this is a benign confirmed case, not a derivation failure)"
     fi
 
-    mkdir -p "$outdir"
+    # Do NOT create $outdir here. T0's build_chain refuses to generate into a directory that
+    # already exists ("[FATAL] <dir> DIR already exist, please check!"), so pre-creating it for the
+    # step logs made this scenario fail at its very first step, every time — it killed itself on
+    # its own log directory. apply_profile.sh/build_chain create the directory; anything that wants
+    # to log into it does so after T0 returns.
     local profile="$SCENARIO_UPG_DIR/../../profiles/production-enterprise.profile"
     local node_dir_root="$outdir/127.0.0.1"
     local rc=0
@@ -402,6 +420,7 @@ scenario_upgrade_run() {
         echo "FAIL: scenario_upgrade: T0 apply_profile.sh failed" >&2
         return 1
     }
+    mkdir -p "$outdir"
 
     local -a node_names=()
     mapfile -t node_names < <(_upg_node_names "$node_dir_root")
@@ -487,14 +506,31 @@ scenario_upgrade_run() {
     done
 
     echo "-- scenario_upgrade: T5 bump data version to $target_ver"
-    _upg_console setSystemConfigByKey compatibility_version "$target_ver" >/dev/null || {
-        echo "FAIL: scenario_upgrade: T5 setSystemConfigByKey compatibility_version failed" >&2
+    # The console exits 0 even when the chain refused the call, so checking $? alone let T5 report
+    # success having changed nothing: against the production profile (auth_check_status=1) the chain
+    # answers {"code":-50000,"msg":"Permission denied"} — "Maybe you should use 'setSysConfigProposal'"
+    # — because committee governance is on. T6 then compared unset flags against unset flags and T7
+    # found itself "consistent with T1", producing a complete, plausible upgrade run in which no
+    # upgrade happened. Demand the success envelope, and say which governance path is needed.
+    local t5_out t5_rc=0
+    t5_out="$(_upg_console setSystemConfigByKey compatibility_version "$target_ver" 2>&1)" || t5_rc=$?
+    if [[ "$t5_rc" != 0 ]] || ! grep -qE '"code"[[:space:]]*:[[:space:]]*0' <<<"$t5_out"; then
+        echo "FAIL: scenario_upgrade: T5 compatibility_version bump to $target_ver did not report success — the chain was NOT upgraded, so T6/T7 below assert nothing." >&2
+        sed 's/^/         /' <<<"$t5_out" >&2
+        if grep -q "Permission denied" <<<"$t5_out"; then
+            echo "       auth_check_status is on for this profile: the bump has to go through a committee proposal (setSysConfigProposal + votes), not setSystemConfigByKey." >&2
+        fi
         rc=1
-    }
+    fi
 
     echo "-- scenario_upgrade: T6 flag-flip assertion"
+    # NOT `${!flags[@]+"${!flags[@]}"}`: combining the `!` index expansion with the `+`
+    # set-or-empty test makes bash parse the whole thing as an INDIRECT expansion — it takes the
+    # value of flags[@] and treats it as a variable name, so a live T6 died with
+    # `bugfix_auth_check bugfix_v1_error_handling ...: invalid variable name`. Guard on the element
+    # count instead, which is unambiguous and works the same on every bash 4+.
     local i after
-    for i in ${!flags[@]+"${!flags[@]}"}; do
+    for ((i = 0; i < ${#flags[@]}; i++)); do
         flag="${flags[$i]}"
         after="$(_upg_get_config_value "$flag")"
         if _upg_flag_flipped "${before_vals[$i]}" "$after"; then
