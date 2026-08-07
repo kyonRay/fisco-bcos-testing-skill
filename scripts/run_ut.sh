@@ -41,8 +41,23 @@ fi
   exit 1
 }
 
-echo ">> running $BIN ${*:-(all cases)}"
-if "$BIN" "$@"; then
+# Run from the working directory CMake registers for these tests, not from wherever the caller
+# happens to stand. cmake/SearchTestCases.cmake's config_test_cases() passes
+# <source>/<module>/test/unittests as each case's WORKING_DIRECTORY, and several suites load
+# fixtures by relative path from there — bcos-gateway's config tests read both
+# "data/config/config_ipv4.ini" AND "../../../bcos-gateway/test/unittests/data/config/..."; only
+# that one directory satisfies both. Run from the repo root instead and the binary reports 11
+# failures; from build/<module>/test, 7; from here, none. A gate that fails on the caller's CWD is
+# a false alarm, and a gate that cries wolf gets ignored as surely as one that stays green.
+# Both spellings are in use in this tree: most modules keep their cases in test/unittests,
+# bcos-executor in test/unittest (singular). Fall back to the binary's own directory for anything
+# that matches neither.
+RUN_DIR="$REPO_ROOT/bcos-$MODULE/test/unittests"
+[ -d "$RUN_DIR" ] || RUN_DIR="$REPO_ROOT/bcos-$MODULE/test/unittest"
+[ -d "$RUN_DIR" ] || RUN_DIR="$(dirname "$BIN")"
+
+echo ">> running $BIN ${*:-(all cases)}  (cwd $RUN_DIR)"
+if ( cd "$RUN_DIR" && "$BIN" "$@" ); then
   echo ">> UT PASS  (module=$MODULE${*:+ , args=$*})  — record as UT-only evidence in the matrix"
 else
   rc=$?
