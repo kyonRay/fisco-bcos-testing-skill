@@ -51,7 +51,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Declarative list of valid scenario names, used by --dry-run validation. This does NOT depend
 # on scripts/scenarios/*.sh having been written yet — Tasks 7-10 add those files one at a time,
 # and this list already knows all four names up front.
-GATE_KNOWN_SCENARIOS="ut dual_rpc malformed upgrade"
+GATE_KNOWN_SCENARIOS="ut dual_rpc malformed jsd upgrade"
 
 # GATE_SCENARIOS_NEEDS_ARGS: scenario names whose registered function cannot be dispatched bare
 # ("$fn" with zero arguments) the way every other scenario is — today only 'upgrade'

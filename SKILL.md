@@ -2,7 +2,7 @@
 name: fisco-bcos-release-gate
 description: >-
   Run a release gate against FISCO-BCOS (AIR mode) that reproduces a production chain's exact
-  config profile locally, replays it through four gate scenario families, and judges the result
+  config profile locally, replays it through five gate scenario families, and judges the result
   under three failure oracles (crash / consensus-halt / state-mismatch), recording any defect
   found. Use this skill WHENEVER the user wants to run a release gate, continuously loop-test a
   build, regression-test before shipping, reproduce a production config profile locally, replay a
@@ -101,14 +101,14 @@ chain starts at `build_chain`'s own default and only reaches the profile's genes
 later `setSystemConfigByKey` call bumps it (which the upgrade scenario's T5 step does explicitly —
 see Step 4).
 
-## gate 四场景族
+## gate 场景族(五个)
 
 `scripts/gate.sh -p <profile> [--scenarios a,b,c] [--dry-run]` is the orchestrator: bring up the
 cluster via `apply_profile.sh`, run a baseline oracle pass, run each requested scenario family in
 turn (oracle pass after each), tear down, aggregate one exit code — any oracle trip OR any
 scenario failure makes the whole round non-zero.
 
-Four scenario families (`GATE_KNOWN_SCENARIOS` in `gate.sh`; each lives in
+Five scenario families (`GATE_KNOWN_SCENARIOS` in `gate.sh`; each lives in
 `scripts/scenarios/scenario_<name>.sh` and self-registers into `GATE_SCENARIOS[<name>]` when
 `gate.sh` sources every file under `scripts/scenarios/`):
 
@@ -117,10 +117,11 @@ Four scenario families (`GATE_KNOWN_SCENARIOS` in `gate.sh`; each lives in
 | `ut` | `scenario_ut.sh` | runs every built module's UT binary via the sibling `fisco-bcos-testing` skill's `run_ut.sh` | crash (exit code) |
 | `dual_rpc` | `scenario_dual_rpc.sh` | deploys + calls a minimal contract through both BCOS RPC (:20200, tars/console) and Web3 RPC (:8545, curl + RLP), then compares `stateRoot` across both paths | state-mismatch + result assertions |
 | `malformed` | `scenario_malformed.sh` | byte-tampers a signed tx, injects it, asserts a *clean* rejection rather than a crash masquerading as one | crash (false-green guard) |
+| `jsd` | `scenario_jsd.sh` | drives real parallel load through java-sdk-demo's three DMC transfer shapes, DAG on and off, and checks each run's balance-conservation assertion | state-mismatch (balance sum) + crash |
 | `upgrade` | `scenario_upgrade.sh` | replays the T0–T8 version-upgrade timeline: rolling binary swap, `compatibility_version` bump, bugfix-flag flip assertion | all three |
 
 **Weighting per profile** (every profile still gets all four families run for real, never a smoke
-pass — `gate.sh -p <profile>` covers `ut`/`dual_rpc`/`malformed`; `upgrade` is driven directly per
+pass — `gate.sh -p <profile>` covers `ut`/`dual_rpc`/`malformed`/`jsd`; `upgrade` is driven directly per
 the note below, since `gate.sh`'s own bare-dispatch loop SKIPs it. The difference across profiles
 is depth on `upgrade` and whether the exploration layer attaches):
 
@@ -130,6 +131,15 @@ is depth on `upgrade` and whether the exploration layer attaches):
 - `sm-gov` / `rpbft-scale` / `default-latest` / `evm-full`: standard gate — `ut` / `dual_rpc` /
   `malformed` at full depth, `upgrade` run at that profile's own compat version, no exploration
   layer attached.
+
+**`jsd` needs `JSD_DIR` and fails without it — on purpose.** It runs java-sdk-demo's DMC transfer
+demos, so it needs a built distribution: point `JSD_DIR` at a directory holding `apps/ conf/ lib/`
+(java-sdk-demo's `dist/` after `bash gradlew ass`). It is pure Java, so build it anywhere with a
+JDK 8/11 and copy `dist/` to the machine under test. With `JSD_DIR` unset the scenario reports FAIL
+rather than skipping, for the same reason `ut` fails with no UT binaries: a release gate that
+reports PASS having exercised no load has not tested anything. The scenario wires the distribution
+itself (SSL off, single peer, signing account pinned to the genesis auth_admin that
+`apply_profile.sh` funds) — do not hand-edit its `conf/config.toml` first.
 
 **`upgrade` is opt-in — the default sweep SKIPs it, on purpose.** `scenario_upgrade_run`'s real
 signature is `scenario_upgrade_run <outdir> <old_bin> <new_bin> <target_ver>`, but `gate.sh`'s
@@ -192,7 +202,7 @@ Two search directions:
    changed.
 2. **Combinatorial divergence**: randomly flip flag combinations across the axes the 6 archetype
    profiles don't individually cover — the cross-product the deterministic layer deliberately
-   leaves unswept (see the note at the end of gate 四场景族).
+   leaves unswept (see the note at the end of gate 场景族).
 
 Delegate the actual mechanics rather than reimplementing them here:
 
@@ -207,7 +217,7 @@ open-ended.
 
 Two directories both named "scenarios" exist in this repo — do not conflate them:
 
-- `scripts/scenarios/` — the 4 general-purpose `scenario_*.sh` families from gate 四场景族, broad
+- `scripts/scenarios/` — the 5 general-purpose `scenario_*.sh` families from gate 场景族, broad
   by design, run on every gate round.
 - `scenarios/` (top-level) — narrow, one-fixture-per-confirmed-failure `.case` files (INI-like:
   `[case]` `profile=` / `input=` / `expect_oracle=pass|reject`), replayed by
@@ -255,9 +265,9 @@ At the end of a gate round (or an exploration session), assemble:
 | `scripts/oracle_lib.sh` / `oracle_crash.sh` / `oracle_liveness.sh` / `oracle_stateroot.sh` | the three failure oracles |
 | `scripts/run_case.sh` | replay one `scenarios/*.case` regression fixture |
 | `scripts/failures_lib.sh` / `report_defects.sh` | local defect sink + Tencent smartsheet sync (报告) |
-| `scripts/scenarios/scenario_ut.sh` / `scenario_dual_rpc.sh` / `scenario_malformed.sh` / `scenario_upgrade.sh` | the four gate scenario families (gate 四场景族) |
+| `scripts/scenarios/scenario_ut.sh` / `scenario_dual_rpc.sh` / `scenario_malformed.sh` / `scenario_jsd.sh` / `scenario_upgrade.sh` | the five gate scenario families (gate 场景族) |
 | `profiles/*.profile` | the 6 hand-maintained config profiles (加载 profile) |
 | `scenarios/*.case` | regression fixtures distilled from confirmed exploration-layer findings (飞轮沉淀) |
 | `references/oracle-detection.md` | 三 oracle: decision logic, default thresholds, how to tune `RG_STALL_SEC` / `RG_ONCE_WAIT_SEC` / `RG_HANG_SEC` |
 | `references/profile-authoring.md` | 加载 profile: how to hand-capture a new production `.profile` from `listSystemConfigs` + `config.genesis` + `config.ini` |
-| `references/upgrade-path.md` | gate 四场景族's `upgrade` row: T0-T8 operational detail, assertion points, and the `scenario_upgrade_run` arg-passing gap |
+| `references/upgrade-path.md` | gate 场景族's `upgrade` row: T0-T8 operational detail, assertion points, and the `scenario_upgrade_run` arg-passing gap |

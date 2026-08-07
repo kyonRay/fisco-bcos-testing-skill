@@ -2,7 +2,7 @@
 
 A [Claude Code](https://claude.com/claude-code) skill that runs a release gate against
 **FISCO-BCOS** (AIR mode): reproduce a production chain's exact config profile locally, replay it
-through four gate scenario families, and judge the result under three failure oracles — crash,
+through five gate scenario families, and judge the result under three failure oracles — crash,
 consensus-halt, state-mismatch — recording any defect found.
 
 It has two legs. A **deterministic gate** (`scripts/gate.sh`) — pure bash, no model in the loop,
@@ -28,10 +28,12 @@ think to test, delegating attack mechanics to the sibling `fisco-bcos-testing` a
   height flat past `RG_STALL_SEC` while transactions are pending), state-mismatch (`stateRoot`
   divergence across nodes) — each judged by an IO-free decision function, unit-tested directly.
   No log-grep-for-`ERROR` oracle by design (noisy, false-positive-prone).
-- **Four gate scenario families** — `ut` (every module's UT binary via the sibling
+- **Five gate scenario families** — `ut` (every module's UT binary via the sibling
   `fisco-bcos-testing` skill), `dual_rpc` (BCOS RPC vs Web3 RPC stateRoot comparison), `malformed`
-  (byte-tampered tx, asserts clean rejection not a crash-masquerading-as-one), `upgrade` (the
-  production profile's T0-T8 version-upgrade timeline).
+  (byte-tampered tx, asserts clean rejection not a crash-masquerading-as-one), `jsd`
+  (java-sdk-demo's three DMC transfer shapes under real parallel load, DAG on and off, each checked
+  against its own balance-conservation assertion), `upgrade` (the production profile's T0-T8
+  version-upgrade timeline).
 - **6 hand-curated profiles** — one real captured production snapshot
   (`production-enterprise`) plus 5 archetypes covering SM-crypto, rPBFT scale, fresh install,
   EVM-full, and a long-distance-upgrade starting point.
@@ -122,10 +124,11 @@ fisco-bcos-release-gate/
 │   ├── run_case.sh                       replay one scenarios/*.case regression fixture
 │   ├── failures_lib.sh                   local failures.jsonl sink (failures_append)
 │   ├── report_defects.sh                 sync unreported failures.jsonl rows to the Tencent smartsheet
-│   └── scenarios/                        the 4 general-purpose gate scenario families
+│   └── scenarios/                        the 5 general-purpose gate scenario families
 │       ├── scenario_ut.sh                runs every module's UT binary (crash oracle)
 │       ├── scenario_dual_rpc.sh          BCOS RPC vs Web3 RPC deploy+call, stateRoot comparison
 │       ├── scenario_malformed.sh         byte-tampered tx, asserts clean rejection
+│       ├── scenario_jsd.sh               java-sdk-demo DMC load, balance conservation (needs JSD_DIR)
 │       └── scenario_upgrade.sh           T0-T8 version-upgrade timeline (production-enterprise only)
 ├── profiles/                             6 hand-maintained captured/archetype .profile files
 │   ├── production-enterprise.profile     the one real captured snapshot — the anchor
@@ -148,7 +151,7 @@ fisco-bcos-release-gate/
 
 ## Design principles
 
-- **Two directories, both named "scenarios," different jobs.** `scripts/scenarios/` holds the 4
+- **Two directories, both named "scenarios," different jobs.** `scripts/scenarios/` holds the 5
   broad `scenario_*.sh` families run every gate round; top-level `scenarios/` holds narrow,
   one-fixture-per-confirmed-failure `.case` files. See `scenarios/README.md`.
 - **Facts don't get baked in.** Methodology is fixed; per-release facts (feature-flag names, exact
