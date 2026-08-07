@@ -132,6 +132,17 @@ is depth on `upgrade` and whether the exploration layer attaches):
   `malformed` at full depth, `upgrade` run at that profile's own compat version, no exploration
   layer attached.
 
+**`upgrade` needs a console built against java-sdk `release-3.9.0`.** Once a profile enables
+`auth_check_status`, the version bump can only go through a committee proposal, and java-sdk 3.8.0's
+`AuthManager.createSetSysConfigProposal` rejects every version string it is given — its
+`EnumNodeVersion` stops at 3.7.0, so 3.16.4, 3.17.0 and even its own 3.8.0 all come back
+"please check valid range". Branch `release-3.9.0` replaced that with a check against the version
+the chain itself reports. Build it (`git clone -b release-3.9.0 …/java-sdk && bash gradlew jar`,
+JDK 8) and drop `fisco-bcos-java-sdk-3.9.0-SNAPSHOT.jar` into the console's `lib/` — also replace
+the console's jackson 2.14 jars with the 2.20 ones from the SDK's own `dist/lib`, or the client
+dies at startup with `NoSuchFieldError: REQUIRE_HANDLERS_FOR_JAVA8_OPTIONALS`. With that in place a
+single governor at 0% thresholds makes the proposal execute immediately, and the bugfix flags flip.
+
 **`jsd` needs `JSD_DIR` and fails without it — on purpose.** It runs java-sdk-demo's DMC transfer
 demos, so it needs a built distribution: point `JSD_DIR` at a directory holding `apps/ conf/ lib/`
 (java-sdk-demo's `dist/` after `bash gradlew ass`). It is pure Java, so build it anywhere with a

@@ -101,4 +101,30 @@ upg="$(cat scripts/scenarios/scenario_upgrade.sh)"
 assert_contains "$upg" "listSystemConfigs" "T6 reads flags via listSystemConfigs"
 assert_contains "$upg" '"code"' "T5 checks the console success envelope rather than exit status alone"
 
+# --- T5 governance fallback ------------------------------------------------------------------
+# With auth_check_status=1 the direct set is refused and the bump must be a committee proposal.
+# The proposal command never prints a {"code":0} envelope — success is "Proposal Status : finished"
+# — and it may print a "Switch to group ... failed" line AFTER the change already took effect.
+PROPOSAL_OK='Set system config proposal created, ID is: 2
+Proposal Status : finished
+Agree Voters:
+0xb16a69f5341a03dc6069f68403b93af715d9cb49
+Switch to group group0 failed! null, please check the existence of the group group0'
+ok=0; grep -q "Proposal Status *: *finished" <<<"$PROPOSAL_OK" && ok=1
+assert_eq "1" "$ok" "finished proposal recognised as success despite the trailing switch-group error"
+assert_eq "" "$(grep -oE '"code"[[:space:]]*:[[:space:]]*0' <<<"$PROPOSAL_OK")" \
+    "proposal output carries no code:0 envelope (so the direct-path check cannot be reused)"
+
+DENIED='{
+    "code":-50000,
+    "msg":"Permission denied"
+}
+Maybe you should use setSysConfigProposal command to change system config.'
+ok=0; grep -q "Permission denied" <<<"$DENIED" && ok=1
+assert_eq "1" "$ok" "governance refusal detected, triggering the proposal fallback"
+
+upg2="$(cat scripts/scenarios/scenario_upgrade.sh)"
+assert_contains "$upg2" "setSysConfigProposal" "T5 has a committee-proposal fallback"
+assert_contains "$upg2" "Proposal Status" "T5 checks proposal completion, not an exit code"
+
 assert_done

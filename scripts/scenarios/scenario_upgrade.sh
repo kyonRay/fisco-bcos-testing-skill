@@ -512,14 +512,35 @@ scenario_upgrade_run() {
     # — because committee governance is on. T6 then compared unset flags against unset flags and T7
     # found itself "consistent with T1", producing a complete, plausible upgrade run in which no
     # upgrade happened. Demand the success envelope, and say which governance path is needed.
+    #
+    # Two paths, because the profile decides which one the chain accepts. Without governance the
+    # direct call works; with auth_check_status=1 it is refused and the bump must be a committee
+    # proposal. Try direct first, fall back on "Permission denied" — that keeps the non-governance
+    # profiles on the simpler path and needs no per-profile configuration.
     local t5_out t5_rc=0
     t5_out="$(_upg_console setSystemConfigByKey compatibility_version "$target_ver" 2>&1)" || t5_rc=$?
-    if [[ "$t5_rc" != 0 ]] || ! grep -qE '"code"[[:space:]]*:[[:space:]]*0' <<<"$t5_out"; then
+    if [[ "$t5_rc" == 0 ]] && grep -qE '"code"[[:space:]]*:[[:space:]]*0' <<<"$t5_out"; then
+        echo "OK: scenario_upgrade: T5 bumped compatibility_version to $target_ver (direct)"
+    elif grep -q "Permission denied" <<<"$t5_out"; then
+        echo ">> scenario_upgrade: T5 direct set refused (governance on) — retrying as a committee proposal"
+        t5_rc=0
+        t5_out="$(_upg_console setSysConfigProposal compatibility_version "$target_ver" 2>&1)" || t5_rc=$?
+        # A single governor at 0% thresholds makes the proposal execute immediately, so success is
+        # "Proposal Status : finished" — NOT a {"code":0} envelope, which this command never prints.
+        # The console then tries to refresh its cached group info and may print
+        # "Switch to group group0 failed"; that is after the fact and must not be read as failure.
+        if [[ "$t5_rc" != 0 ]] || ! grep -q "Proposal Status *: *finished" <<<"$t5_out"; then
+            echo "FAIL: scenario_upgrade: T5 committee proposal for compatibility_version=$target_ver did not finish — the chain was NOT upgraded, so T6/T7 below assert nothing." >&2
+            sed 's/^/         /' <<<"$t5_out" >&2
+            grep -q "please check valid range" <<<"$t5_out" && \
+                echo "       This is java-sdk 3.8.0's AuthManager rejecting the version string (its EnumNodeVersion stops at 3.7.0). Build java-sdk from branch release-3.9.0 and put its jar plus its jackson 2.20 dependencies in the console's lib/." >&2
+            rc=1
+        else
+            echo "OK: scenario_upgrade: T5 bumped compatibility_version to $target_ver (committee proposal)"
+        fi
+    else
         echo "FAIL: scenario_upgrade: T5 compatibility_version bump to $target_ver did not report success — the chain was NOT upgraded, so T6/T7 below assert nothing." >&2
         sed 's/^/         /' <<<"$t5_out" >&2
-        if grep -q "Permission denied" <<<"$t5_out"; then
-            echo "       auth_check_status is on for this profile: the bump has to go through a committee proposal (setSysConfigProposal + votes), not setSystemConfigByKey." >&2
-        fi
         rc=1
     fi
 
