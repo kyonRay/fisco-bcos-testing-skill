@@ -26,6 +26,14 @@ declare -gA PROFILE_GENESIS
 declare -gA PROFILE_REPLAY
 declare -gA PROFILE_CONFIG
 
+# Replay is ORDER-SENSITIVE and an associative array has no order: iterating "${!PROFILE_REPLAY[@]}"
+# yields bash's hash order, so the same profile can replay its flags in a different sequence on a
+# different machine. That is not cosmetic — Features.cpp:37-46 rejects feature_balance_precompiled
+# before feature_balance, and feature_balance_policy1 before feature_balance_precompiled. Keep the
+# file's own key order alongside the maps and iterate THAT.
+declare -ga PROFILE_REPLAY_ORDER
+declare -ga PROFILE_CONFIG_ORDER
+
 # profile_load <path> — parse a .profile file into the PROFILE_* arrays.
 profile_load() {
     local path="$1"
@@ -33,6 +41,8 @@ profile_load() {
     PROFILE_GENESIS=()
     PROFILE_REPLAY=()
     PROFILE_CONFIG=()
+    PROFILE_REPLAY_ORDER=()
+    PROFILE_CONFIG_ORDER=()
 
     local section=""
     local line
@@ -61,25 +71,32 @@ profile_load() {
             case "$section" in
                 meta) PROFILE_META["$key"]="$value" ;;
                 genesis) PROFILE_GENESIS["$key"]="$value" ;;
-                system_config_replay) PROFILE_REPLAY["$key"]="$value" ;;
-                config_ini_override) PROFILE_CONFIG["$key"]="$value" ;;
+                system_config_replay)
+                    [[ -v PROFILE_REPLAY["$key"] ]] || PROFILE_REPLAY_ORDER+=("$key")
+                    PROFILE_REPLAY["$key"]="$value"
+                    ;;
+                config_ini_override)
+                    [[ -v PROFILE_CONFIG["$key"] ]] || PROFILE_CONFIG_ORDER+=("$key")
+                    PROFILE_CONFIG["$key"]="$value"
+                    ;;
             esac
         fi
     done < "$path"
 }
 
-# profile_replay_pairs — print PROFILE_REPLAY entries as "key value" lines.
+# profile_replay_pairs — print PROFILE_REPLAY entries as "key value" lines, in the profile file's
+# own order (see PROFILE_REPLAY_ORDER above — this order is load-bearing, not cosmetic).
 profile_replay_pairs() {
     local key
-    for key in "${!PROFILE_REPLAY[@]}"; do
+    for key in ${PROFILE_REPLAY_ORDER+"${PROFILE_REPLAY_ORDER[@]}"}; do
         echo "$key ${PROFILE_REPLAY[$key]}"
     done
 }
 
-# profile_config_pairs — print PROFILE_CONFIG entries as "section.key value" lines.
+# profile_config_pairs — print PROFILE_CONFIG entries as "section.key value" lines, in file order.
 profile_config_pairs() {
     local key
-    for key in "${!PROFILE_CONFIG[@]}"; do
+    for key in ${PROFILE_CONFIG_ORDER+"${PROFILE_CONFIG_ORDER[@]}"}; do
         echo "$key ${PROFILE_CONFIG[$key]}"
     done
 }
