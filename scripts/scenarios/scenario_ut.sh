@@ -58,17 +58,34 @@ scenario_ut_run() {
     # (build/bcos-<module>/test/test-bcos-<module>) — run_ut.sh has no "list all modules" mode of
     # its own, so this enumeration is ours to do; the actual run/pass-fail decision is still
     # entirely delegated to run_ut.sh below.
+    # Search by name at any depth, NOT with a fixed-depth glob: bcos-executor's binary sits one
+    # level deeper (test/unittest/test-bcos-executor) than everyone else's (test/test-bcos-*), so
+    # the fixed glob silently dropped the executor — the single most important module here — while
+    # the scenario still reported "ran every built module's UT binary" and PASSED. Enumerating 16
+    # of 17 modules and calling it complete is the same false green as running none.
     local modules=() bin module
-    for bin in "$build_dir"/bcos-*/test/test-bcos-*; do
+    while IFS= read -r bin; do
         [[ -x "$bin" ]] || continue
         module="$(basename "$bin")"
         module="${module#test-bcos-}"
         modules+=("$module")
-    done
+    done < <(find "$build_dir" -type f -name 'test-bcos-*' 2>/dev/null | sort)
 
     if [[ ${#modules[@]} -eq 0 ]]; then
-        echo "scenario_ut: no built module UT binaries found under $build_dir/bcos-*/test/test-bcos-*" >&2
-        return 0
+        # A release gate that reports PASS after running ZERO tests is the exact false green this
+        # harness exists to catch. "No UT binaries" is not evidence of health — it is absence of
+        # evidence, and on a real run that must fail the gate. (A build configured -DTESTS=OFF is
+        # the usual cause; a live run against one silently "passed" this scenario before the fix.)
+        # Dry mode still returns 0: it only prints a plan and never claims evidence either way.
+        if [[ "${SCENARIO_DRY:-0}" == 1 ]]; then
+            echo "DRY: scenario_ut: no built module UT binaries under $build_dir/bcos-*/test/test-bcos-* — a real run would FAIL here"
+            return 0
+        fi
+        echo "ERROR: scenario_ut: no built module UT binaries found under $build_dir/bcos-*/test/test-bcos-*" >&2
+        echo "       Zero UT evidence cannot pass a release gate — reporting FAIL, not a skip." >&2
+        echo "       Build them first: configure with -DTESTS=ON, then e.g." >&2
+        echo "         cmake --build $build_dir --target test-bcos-txpool -j" >&2
+        return 1
     fi
 
     if [[ "${SCENARIO_DRY:-0}" == 1 ]]; then
