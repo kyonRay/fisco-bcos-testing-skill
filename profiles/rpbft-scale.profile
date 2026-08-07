@@ -12,6 +12,10 @@ epoch_block_num = 1000
 feature_rpbft = 1
 tx_count_limit = 1000
 [config_ini_override]
+# Gate runs drive the chain through the console, which is configured SSL-off; leaving RPC SSL on
+# means the console cannot connect at all (handshake dies as "end of stream"). RPC SSL is not an
+# axis any of these archetypes exists to test, so turn it off.
+rpc.enable_ssl = false
 sync.send_txs_by_tree = true
 sync.sync_block_by_tree = true
 sync.tree_width = 3
