@@ -51,12 +51,18 @@ public final class TamperFuzz {
             System.exit(runFuzzMode(args) ? 0 : 1);
             return;
         }
+        if (args.length >= 1 && "web3fuzz".equals(args[0])) {
+            System.exit(runWeb3FuzzMode(args) ? 0 : 1);
+            return;
+        }
         if (args.length != 1) {
             System.err.println(
                     "usage: java -jar tamper-fuzz-all.jar <illegal_to|oob_field|bad_signature>"
                             + " | --selfcheck"
                             + " | fuzz <count> <seed> <struct|bytes|both>"
-                            + " | fuzz --selfcheck");
+                            + " | fuzz --selfcheck"
+                            + " | web3fuzz <count> <seed> <struct|bytes|both>"
+                            + " | web3fuzz --selfcheck");
             System.exit(1);
             return;
         }
@@ -108,6 +114,43 @@ public final class TamperFuzz {
             return false;
         } catch (Exception e) {
             System.err.println("ERROR: tamper-fuzz: fuzz: unexpected failure: " + e);
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /** `web3fuzz <count> <seed> <strategy>` — print <count> deterministic mutant TSV lines (see
+     * Web3FuzzGenerator's class doc). `web3fuzz --selfcheck` runs Web3FuzzGenerator.selfCheck()
+     * instead (determinism + struct round-trip assertions, output to stderr). Mirrors
+     * runFuzzMode's exit-code contract exactly. */
+    private static boolean runWeb3FuzzMode(String[] args) {
+        if (args.length == 2 && "--selfcheck".equals(args[1])) {
+            return Web3FuzzGenerator.selfCheck();
+        }
+        if (args.length != 4) {
+            System.err.println(
+                    "usage: java -jar tamper-fuzz-all.jar web3fuzz <count> <seed> <struct|bytes|both>"
+                            + " | web3fuzz --selfcheck");
+            return false;
+        }
+        try {
+            int count = Integer.parseInt(args[1]);
+            long seed = Long.parseLong(args[2]);
+            String strategy = args[3];
+            for (String line : Web3FuzzGenerator.generate(count, seed, strategy)) {
+                System.out.println(line);
+            }
+            return true;
+        } catch (NumberFormatException e) {
+            System.err.println(
+                    "ERROR: tamper-fuzz: web3fuzz: <count> and <seed> must be integers: "
+                            + e.getMessage());
+            return false;
+        } catch (IllegalArgumentException e) {
+            System.err.println("ERROR: tamper-fuzz: web3fuzz: " + e.getMessage());
+            return false;
+        } catch (Exception e) {
+            System.err.println("ERROR: tamper-fuzz: web3fuzz: unexpected failure: " + e);
             e.printStackTrace();
             return false;
         }

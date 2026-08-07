@@ -70,9 +70,50 @@ for hi in 1 2 3 9 10 99 100; do
 done
 
 # ---------------------------------------------------------------------------
-# _fuzz_case_filename — single source of truth for a distilled case's filename.
+# _fuzz_case_filename — single source of truth for a distilled case's filename. transport defaults
+# to "bcos" (unset RG_FUZZ_TRANSPORT / default) and must reproduce the ORIGINAL filename exactly —
+# only "web3" changes the name, so an existing BCOS case's identity never changes.
 # ---------------------------------------------------------------------------
-assert_eq "fuzz_seed42_idx7.case" "$(_fuzz_case_filename 42 7)" "case filename encodes seed and idx"
+assert_eq "fuzz_seed42_idx7.case" "$(_fuzz_case_filename 42 7)" "case filename encodes seed and idx (2-arg call, unchanged from before the transport switch)"
+assert_eq "fuzz_seed42_idx7.case" "$(_fuzz_case_filename 42 7 bcos)" "case filename: explicit bcos transport matches the default"
+assert_eq "fuzz_web3_seed42_idx7.case" "$(_fuzz_case_filename 42 7 web3)" "case filename: web3 transport gets a distinguishing fuzz_web3_ prefix"
+
+# ---------------------------------------------------------------------------
+# _fuzz_generator_subcommand — which tamper-fuzz-all.jar subcommand a transport drives.
+# ---------------------------------------------------------------------------
+assert_eq "fuzz" "$(_fuzz_generator_subcommand bcos)" "generator subcommand: bcos -> fuzz"
+assert_eq "web3fuzz" "$(_fuzz_generator_subcommand web3)" "generator subcommand: web3 -> web3fuzz"
+RG_FUZZ_TRANSPORT=bcos
+assert_eq "fuzz" "$(_fuzz_generator_subcommand)" "generator subcommand: no-arg call reads RG_FUZZ_TRANSPORT (bcos)"
+RG_FUZZ_TRANSPORT=web3
+assert_eq "web3fuzz" "$(_fuzz_generator_subcommand)" "generator subcommand: no-arg call reads RG_FUZZ_TRANSPORT (web3)"
+# Reset to the script's own default (NOT unset — fuzz_bcos.sh runs under `set -u`, and later code
+# in this file, e.g. _fuzz_reinject_range_and_check below, reads RG_FUZZ_TRANSPORT indirectly via
+# _fuzz_generator_subcommand's no-arg fallback; leaving it unbound would trip nounset there).
+RG_FUZZ_TRANSPORT=bcos
+
+# ---------------------------------------------------------------------------
+# _fuzz_inject_payload_bcos / _fuzz_inject_payload_web3 — pure JSON-RPC payload builders. The
+# whole point of the web3 leg: eth_sendRawTransaction takes a single hex string in params, NOT the
+# BCOS <groupID, nodeName, hex> triple.
+# ---------------------------------------------------------------------------
+BCOS_GROUP_ID=group0
+assert_eq '{"jsonrpc":"2.0","method":"sendTransaction","params":["group0","","0xdead"],"id":1}' \
+    "$(_fuzz_inject_payload_bcos 0xdead)" "bcos payload: groupID/nodeName/hex triple"
+assert_eq '{"jsonrpc":"2.0","method":"eth_sendRawTransaction","params":["0xdead"],"id":1}' \
+    "$(_fuzz_inject_payload_web3 0xdead)" "web3 payload: single hex string in params, not a triple"
+
+# ---------------------------------------------------------------------------
+# _fuzz_inject_curl_cmd — the exact curl command a distilled .case's `input =` line records. For
+# the default bcos transport this must reproduce the ORIGINAL hardcoded input= line verbatim (see
+# the case-writer's own doc) — a byte-for-byte non-regression check.
+# ---------------------------------------------------------------------------
+BCOS_RPC_URL=http://127.0.0.1:20200
+RG_FUZZ_WEB3_URL=http://127.0.0.1:8545
+assert_eq "curl -sS -X POST -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"method\":\"sendTransaction\",\"params\":[\"group0\",\"\",\"0xdead\"],\"id\":1}' http://127.0.0.1:20200" \
+    "$(_fuzz_inject_curl_cmd 0xdead bcos)" "inject curl cmd: bcos transport targets BCOS_RPC_URL with sendTransaction"
+assert_eq "curl -sS -X POST -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"method\":\"eth_sendRawTransaction\",\"params\":[\"0xdead\"],\"id\":1}' http://127.0.0.1:8545" \
+    "$(_fuzz_inject_curl_cmd 0xdead web3)" "inject curl cmd: web3 transport targets RG_FUZZ_WEB3_URL with eth_sendRawTransaction"
 
 # ---------------------------------------------------------------------------
 # _fuzz_print_dry_plan — pure formatting, no IO (the only live-touching parts of fuzz_bcos.sh are
@@ -85,6 +126,18 @@ assert_not_contains "$out" "ERROR" "dry plan never touches a live chain"
 
 out_sec="$(_fuzz_print_dry_plan 42 20 120 100 both)"
 assert_contains "$out_sec" "wall-clock, 120s" "dry plan reports sec mode when RG_FUZZ_SEC>0"
+
+# transport-aware dry plan (Entry 3): omitting the 6th arg defaults to bcos and must reproduce the
+# exact preflight wording the pre-transport-switch driver printed — no behavior change for the
+# default path.
+assert_contains "$out" "transport=bcos generator=fuzz" "dry plan (no transport arg): defaults to bcos/fuzz"
+assert_contains "$out" "preflight (PIDs + BCOS RPC + baseline oracle)" "dry plan (no transport arg): BCOS preflight wording unchanged"
+
+out_web3="$(_fuzz_print_dry_plan 42 20 0 100 both web3)"
+assert_contains "$out_web3" "transport=web3 generator=web3fuzz" "dry plan (web3 transport): reports web3fuzz generator"
+assert_contains "$out_web3" "eth_sendRawTransaction" "dry plan (web3 transport): reports the eth_sendRawTransaction inject target"
+assert_contains "$out_web3" "preflight (PIDs + Web3 RPC + baseline oracle)" "dry plan (web3 transport): Web3 RPC preflight wording"
+assert_not_contains "$out_web3" "ERROR" "dry plan (web3 transport): never touches a live chain either"
 
 # ---------------------------------------------------------------------------
 # _fuzz_should_bisect — pure RG_FUZZ_RESTART_CMD gating decision (Bug 2). Bisecting a genuine
@@ -185,5 +238,23 @@ probe_rc=0
 _fuzz_reinject_range_and_check 42 both 0 4 || probe_rc=$?
 assert_eq "0" "$probe_rc" \
     "real probe: oracle TRIPPED -> returns 0 (reproduced), matching _fuzz_bisect's contract"
+
+# ---------------------------------------------------------------------------
+# _fuzz_write_case transport-awareness (Entry 3). The distilled .case's `input =` line must record
+# the right RPC call for the transport that actually found the trip — a bcos case must reproduce
+# the ORIGINAL hardcoded input= line byte-for-byte (no regression), a web3 case must record
+# eth_sendRawTransaction against RG_FUZZ_WEB3_URL instead.
+# ---------------------------------------------------------------------------
+_case_tmpdir="$(mktemp -d)"
+_fuzz_write_case "$_case_tmpdir/bcos.case" "profiles/production-enterprise.profile" "0xdead" 42 7 bcos >/dev/null 2>&1
+bcos_case_input="$(grep '^input = ' "$_case_tmpdir/bcos.case")"
+assert_eq "input = curl -sS -X POST -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"method\":\"sendTransaction\",\"params\":[\"group0\",\"\",\"0xdead\"],\"id\":1}' http://127.0.0.1:20200" \
+    "$bcos_case_input" "written .case (bcos): input= line matches the original hardcoded sendTransaction curl exactly"
+
+_fuzz_write_case "$_case_tmpdir/web3.case" "profiles/production-enterprise.profile" "0xdead" 42 7 web3 >/dev/null 2>&1
+web3_case_input="$(grep '^input = ' "$_case_tmpdir/web3.case")"
+assert_eq "input = curl -sS -X POST -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"method\":\"eth_sendRawTransaction\",\"params\":[\"0xdead\"],\"id\":1}' http://127.0.0.1:8545" \
+    "$web3_case_input" "written .case (web3): input= line uses eth_sendRawTransaction against RG_FUZZ_WEB3_URL"
+rm -rf "$_case_tmpdir"
 
 assert_done

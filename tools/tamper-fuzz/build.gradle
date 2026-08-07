@@ -17,6 +17,11 @@ repositories {
 dependencies {
     implementation 'org.fisco-bcos.java-sdk:fisco-bcos-java-sdk:3.9.0-SNAPSHOT'
     implementation 'org.fisco-bcos:bcos-sdk-jni:3.7.0'
+    // Web3-RPC fuzz leg (Entry 3): 4.9.x is the last Web3J line built for Java 8 (options.release=8
+    // below still governs OUR sources; this pin keeps web3j's own shipped bytecode <= major 52 too,
+    // since 4.10+/5.x moved their minimum to Java 11). Pure-Java Bouncy Castle for secp256k1 — no
+    // JNI/native-lib concern, unlike bcos-sdk-jni above.
+    implementation 'org.web3j:core:4.9.8'
 }
 
 // Compile with the local JDK 21 toolchain but target bytecode 8 so the fat jar runs unchanged

@@ -31,7 +31,22 @@
 #   BCOS_GROUP_ID         group id for the <groupID, nodeName, hex> sendTransaction param
 #                         convention (default group0), same as scenario_malformed.sh
 #   RG_FUZZ_WEB3_URL      Web3 RPC endpoint the liveness/stateroot oracles poll (default
-#                         http://127.0.0.1:8545 — the AIR default web3_rpc.listen_port)
+#                         http://127.0.0.1:8545 — the AIR default web3_rpc.listen_port). ALSO the
+#                         injection endpoint when RG_FUZZ_TRANSPORT=web3 (see below) — the live
+#                         Web3 RPC serves both eth_sendRawTransaction and the oracle-polled
+#                         eth_blockNumber/eth_chainId on the same port.
+#   RG_FUZZ_TRANSPORT     bcos | web3 (default bcos). Which RPC surface this driver injects
+#                         mutants against — see _fuzz_generator_subcommand / _fuzz_inject_and_classify.
+#                           - bcos (default, UNCHANGED behavior): generator subcommand `fuzz`
+#                             (FuzzGenerator, tars-encoded BCOS tx), injected via sendTransaction
+#                             <groupID, nodeName, hex> to BCOS_RPC_URL, preflight confirms
+#                             getBlockNumber.
+#                           - web3: generator subcommand `web3fuzz` (Web3FuzzGenerator, signed-RLP
+#                             Ethereum tx), injected via eth_sendRawTransaction ["hex"] to
+#                             RG_FUZZ_WEB3_URL, preflight confirms eth_chainId. The oracle checks,
+#                             bisection, restart hook, and .case distillation are all reused
+#                             UNCHANGED — only the generator subcommand name and the injection
+#                             payload/endpoint differ (see _fuzz_case_filename, _fuzz_write_case).
 #   RG_FUZZ_STATEROOT_URLS  comma-separated EXTRA node Web3 RPC URLs to compare stateRoot against
 #                         RG_FUZZ_WEB3_URL. GAP: this driver has no profile/cluster-layout wiring
 #                         to auto-discover other nodes' ports (see run_case.sh / gate.sh's own
@@ -121,6 +136,7 @@ NODE_DIR="${NODE_DIR:-./nodes-release-gate/127.0.0.1}"
 BCOS_RPC_URL="${BCOS_RPC_URL:-http://127.0.0.1:20200}"
 BCOS_GROUP_ID="${BCOS_GROUP_ID:-group0}"
 RG_FUZZ_WEB3_URL="${RG_FUZZ_WEB3_URL:-http://127.0.0.1:8545}"
+RG_FUZZ_TRANSPORT="${RG_FUZZ_TRANSPORT:-bcos}"
 FUZZ_JAR="${FUZZ_JAR:-${TAMPER_FUZZ_JAR:-$SCRIPT_DIR/../tools/tamper-fuzz/build/libs/tamper-fuzz-all.jar}}"
 JAVA_BIN="${JAVA_BIN:-java}"
 
@@ -205,11 +221,59 @@ _fuzz_bisect_upper_half() {
     echo "$(( mid + 1 )) $hi"
 }
 
-# _fuzz_case_filename <seed> <idx> — single source of truth for a distilled case's filename, so
-# the code that writes it and anything that later needs to find it agree.
+# _fuzz_case_filename <seed> <idx> [transport] — single source of truth for a distilled case's
+# filename, so the code that writes it and anything that later needs to find it agree. transport
+# defaults to "bcos" (RG_FUZZ_TRANSPORT unset/bcos), reproducing the original filename exactly —
+# only transport="web3" changes the name, so an existing (seed,idx) BCOS case's filename/identity
+# never changes.
 _fuzz_case_filename() {
-    local seed="$1" idx="$2"
-    echo "fuzz_seed${seed}_idx${idx}.case"
+    local seed="$1" idx="$2" transport="${3:-bcos}"
+    if [[ "$transport" == "web3" ]]; then
+        echo "fuzz_web3_seed${seed}_idx${idx}.case"
+    else
+        echo "fuzz_seed${seed}_idx${idx}.case"
+    fi
+}
+
+# _fuzz_generator_subcommand [transport] — single source of truth for which tamper-fuzz-all.jar
+# subcommand this driver invokes: `fuzz` (FuzzGenerator, BCOS) or `web3fuzz` (Web3FuzzGenerator,
+# Web3-RPC). transport defaults to $RG_FUZZ_TRANSPORT when omitted (the live call-site
+# convention); tests pass it explicitly to stay hermetic.
+_fuzz_generator_subcommand() {
+    local transport="${1:-$RG_FUZZ_TRANSPORT}"
+    if [[ "$transport" == "web3" ]]; then
+        echo "web3fuzz"
+    else
+        echo "fuzz"
+    fi
+}
+
+# _fuzz_inject_payload_bcos <hex> — pure JSON-RPC payload builder for BCOS sendTransaction, the
+# <groupID, nodeName, hex> triple convention scenario_malformed.sh also uses. Factored out of
+# _fuzz_inject_and_classify so both the live injection call and _fuzz_inject_curl_cmd's distilled
+# .case `input =` line build the identical payload from one place.
+_fuzz_inject_payload_bcos() {
+    local hex="$1"
+    echo "{\"jsonrpc\":\"2.0\",\"method\":\"sendTransaction\",\"params\":[\"${BCOS_GROUP_ID}\",\"\",\"${hex}\"],\"id\":1}"
+}
+
+# _fuzz_inject_payload_web3 <hex> — pure JSON-RPC payload builder for eth_sendRawTransaction: a
+# single 0x-prefixed signed-RLP hex string in params, NOT the BCOS <groupID, nodeName, hex> triple.
+_fuzz_inject_payload_web3() {
+    local hex="$1"
+    echo "{\"jsonrpc\":\"2.0\",\"method\":\"eth_sendRawTransaction\",\"params\":[\"${hex}\"],\"id\":1}"
+}
+
+# _fuzz_inject_curl_cmd <hex> [transport] — pure formatter for the exact curl command a distilled
+# .case's `input =` line records (see _fuzz_write_case). transport defaults to $RG_FUZZ_TRANSPORT.
+# For the default bcos transport this reproduces the original hardcoded `input =` line verbatim.
+_fuzz_inject_curl_cmd() {
+    local hex="$1" transport="${2:-$RG_FUZZ_TRANSPORT}"
+    if [[ "$transport" == "web3" ]]; then
+        echo "curl -sS -X POST -H 'Content-Type: application/json' -d '$(_fuzz_inject_payload_web3 "$hex")' $RG_FUZZ_WEB3_URL"
+    else
+        echo "curl -sS -X POST -H 'Content-Type: application/json' -d '$(_fuzz_inject_payload_bcos "$hex")' $BCOS_RPC_URL"
+    fi
 }
 
 # _fuzz_should_bisect <restart_cmd_set:0|1> <crash_tripped:0|1> — pure gating decision (see
@@ -227,13 +291,26 @@ _fuzz_should_bisect() {
     return 0
 }
 
-# _fuzz_print_dry_plan <base_seed> <iters> <sec> <batch> <strategy> — pure formatting of the
-# resolved run plan for --dry-run. No IO.
+# _fuzz_print_dry_plan <base_seed> <iters> <sec> <batch> <strategy> [transport] — pure formatting
+# of the resolved run plan for --dry-run. No IO. transport defaults to "bcos", reproducing the
+# original (pre-transport-switch) output exactly for every existing call site/test.
 _fuzz_print_dry_plan() {
-    local base_seed="$1" iters="$2" sec="$3" batch="$4" strategy="$5"
-    local mode value
+    local base_seed="$1" iters="$2" sec="$3" batch="$4" strategy="$5" transport="${6:-bcos}"
+    local mode value gen preflight_desc
     read -r mode value < <(_fuzz_plan_mode "$iters" "$sec")
+    gen="$(_fuzz_generator_subcommand "$transport")"
+    if [[ "$transport" == "web3" ]]; then
+        preflight_desc="Web3 RPC"
+    else
+        preflight_desc="BCOS RPC"
+    fi
     echo "DRY: fuzz_bcos: base_seed=$base_seed strategy=$strategy batch_size=$batch"
+    echo "DRY: fuzz_bcos: transport=$transport generator=$gen"
+    if [[ "$transport" == "web3" ]]; then
+        echo "DRY: fuzz_bcos: inject target: Web3 RPC $RG_FUZZ_WEB3_URL (eth_sendRawTransaction)"
+    else
+        echo "DRY: fuzz_bcos: inject target: BCOS RPC $BCOS_RPC_URL (sendTransaction)"
+    fi
     if [[ "$mode" == "sec" ]]; then
         echo "DRY: fuzz_bcos: budget: wall-clock, ${value}s (RG_FUZZ_SEC takes precedence over RG_FUZZ_ITERS)"
     else
@@ -241,7 +318,7 @@ _fuzz_print_dry_plan() {
     fi
     echo "DRY: fuzz_bcos: batch 0 seed = $(_fuzz_batch_seed "$base_seed" 0)"
     echo "DRY: fuzz_bcos: batch 1 seed = $(_fuzz_batch_seed "$base_seed" 1)"
-    echo "DRY: fuzz_bcos: plan: preflight (PIDs + BCOS RPC + baseline oracle) -> per-batch [generate -> inject -> tally -> oracle check] -> on trip: bisect -> distill .case + failures.jsonl -> stop unless RG_FUZZ_CONTINUE=1"
+    echo "DRY: fuzz_bcos: plan: preflight (PIDs + $preflight_desc + baseline oracle) -> per-batch [generate -> inject -> tally -> oracle check] -> on trip: bisect -> distill .case + failures.jsonl -> stop unless RG_FUZZ_CONTINUE=1"
 }
 
 # ---------------------------------------------------------------------------
@@ -254,10 +331,15 @@ _fuzz_discover_pids() {
 }
 
 _fuzz_inject_and_classify() {
-    local hex="$1" resp
-    resp="$(curl -sS -m 10 -H 'Content-Type: application/json' \
-        -d "{\"jsonrpc\":\"2.0\",\"method\":\"sendTransaction\",\"params\":[\"${BCOS_GROUP_ID}\",\"\",\"$hex\"],\"id\":1}" \
-        "$BCOS_RPC_URL" 2>/dev/null)" || resp=""
+    local hex="$1" resp payload url
+    if [[ "$RG_FUZZ_TRANSPORT" == "web3" ]]; then
+        payload="$(_fuzz_inject_payload_web3 "$hex")"
+        url="$RG_FUZZ_WEB3_URL"
+    else
+        payload="$(_fuzz_inject_payload_bcos "$hex")"
+        url="$BCOS_RPC_URL"
+    fi
+    resp="$(curl -sS -m 10 -H 'Content-Type: application/json' -d "$payload" "$url" 2>/dev/null)" || resp=""
     _fuzz_classify_response "$resp"
 }
 
@@ -335,16 +417,28 @@ _fuzz_preflight() {
     fi
     echo ">> fuzz_bcos: preflight: discovered PIDs: ${NODE_PIDS[*]}"
 
-    echo ">> fuzz_bcos: preflight: confirming BCOS RPC answers at $BCOS_RPC_URL"
     local resp
-    resp="$(curl -sS -m 10 -H 'Content-Type: application/json' \
-        -d "{\"jsonrpc\":\"2.0\",\"method\":\"getBlockNumber\",\"params\":[\"${BCOS_GROUP_ID}\",\"\"],\"id\":1}" \
-        "$BCOS_RPC_URL" 2>/dev/null || true)"
-    if [[ -z "$resp" || "$resp" != *'"result"'* ]]; then
-        echo "ERROR: fuzz_bcos: BCOS RPC at $BCOS_RPC_URL did not answer getBlockNumber cleanly — is a chain up? response: $resp" >&2
-        return 1
+    if [[ "$RG_FUZZ_TRANSPORT" == "web3" ]]; then
+        echo ">> fuzz_bcos: preflight: confirming Web3 RPC answers eth_chainId at $RG_FUZZ_WEB3_URL"
+        resp="$(curl -sS -m 10 -H 'Content-Type: application/json' \
+            -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
+            "$RG_FUZZ_WEB3_URL" 2>/dev/null || true)"
+        if [[ -z "$resp" || "$resp" != *'"result"'* ]]; then
+            echo "ERROR: fuzz_bcos: Web3 RPC at $RG_FUZZ_WEB3_URL did not answer eth_chainId cleanly — is a chain up? response: $resp" >&2
+            return 1
+        fi
+        echo ">> fuzz_bcos: preflight: Web3 RPC OK"
+    else
+        echo ">> fuzz_bcos: preflight: confirming BCOS RPC answers at $BCOS_RPC_URL"
+        resp="$(curl -sS -m 10 -H 'Content-Type: application/json' \
+            -d "{\"jsonrpc\":\"2.0\",\"method\":\"getBlockNumber\",\"params\":[\"${BCOS_GROUP_ID}\",\"\"],\"id\":1}" \
+            "$BCOS_RPC_URL" 2>/dev/null || true)"
+        if [[ -z "$resp" || "$resp" != *'"result"'* ]]; then
+            echo "ERROR: fuzz_bcos: BCOS RPC at $BCOS_RPC_URL did not answer getBlockNumber cleanly — is a chain up? response: $resp" >&2
+            return 1
+        fi
+        echo ">> fuzz_bcos: preflight: BCOS RPC OK"
     fi
-    echo ">> fuzz_bcos: preflight: BCOS RPC OK"
 
     [[ -x "$JAVA_BIN" ]] || command -v "$JAVA_BIN" >/dev/null 2>&1 || {
         echo "ERROR: fuzz_bcos: JAVA_BIN '$JAVA_BIN' not found on PATH" >&2
@@ -365,8 +459,10 @@ _fuzz_preflight() {
 }
 
 _fuzz_write_case() {
-    local path="$1" profile="$2" hex="$3" seed="$4" idx="$5"
+    local path="$1" profile="$2" hex="$3" seed="$4" idx="$5" transport="${6:-bcos}"
     mkdir -p "$(dirname "$path")"
+    local input_line
+    input_line="$(_fuzz_inject_curl_cmd "$hex" "$transport")"
     cat > "$path" <<CASEEOF
 # auto-distilled by fuzz_bcos.sh from a confirmed oracle trip (seed=$seed idx=$idx). This case
 # records the TARGET post-fix behavior (expect_oracle=reject) per scenarios/README.md's flywheel —
@@ -375,7 +471,7 @@ _fuzz_write_case() {
 # node is fixed to cleanly reject this input instead. See failures.jsonl for the still-open defect.
 [case]
 profile = $profile
-input = curl -sS -X POST -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","method":"sendTransaction","params":["${BCOS_GROUP_ID}","","$hex"],"id":1}' $BCOS_RPC_URL
+input = $input_line
 expect_oracle = reject
 CASEEOF
     echo ">> fuzz_bcos: distilled case written to $path" >&2
@@ -399,11 +495,12 @@ _fuzz_reinject_range_and_check() {
     local seed="$1" strategy="$2" lo="$3" hi="$4"
     local count=$(( hi + 1 ))
     local tail_n=$(( hi - lo + 1 ))
+    local gen_cmd; gen_cmd="$(_fuzz_generator_subcommand)"
     local idx kind detail hex
     while IFS=$'\t' read -r idx kind detail hex; do
         [[ -z "${hex:-}" ]] && continue
         _fuzz_inject_and_classify "$hex" >/dev/null
-    done < <("$JAVA_BIN" -jar "$FUZZ_JAR" fuzz "$count" "$seed" "$strategy" | tail -n "$tail_n")
+    done < <("$JAVA_BIN" -jar "$FUZZ_JAR" "$gen_cmd" "$count" "$seed" "$strategy" | tail -n "$tail_n")
     if _fuzz_oracle_check_once "bisect[$lo,$hi]"; then
         return 1   # oracles clean => trip did NOT reproduce in this range
     fi
@@ -511,6 +608,7 @@ _fuzz_run() {
     local start_ts batch_idx=0 oracle_tripped=0 case_written=""
     local -a all_classes=()
     start_ts="$(date +%s)"
+    local gen_cmd; gen_cmd="$(_fuzz_generator_subcommand)"
 
     while true; do
         if [[ "$mode" == "iters" ]]; then
@@ -531,7 +629,7 @@ _fuzz_run() {
         while IFS=$'\t' read -r idx kind detail hex; do
             [[ -z "${hex:-}" ]] && continue
             classes+=("$(_fuzz_inject_and_classify "$hex")")
-        done < <("$JAVA_BIN" -jar "$FUZZ_JAR" fuzz "$batch_size" "$seed" "$strategy")
+        done < <("$JAVA_BIN" -jar "$FUZZ_JAR" "$gen_cmd" "$batch_size" "$seed" "$strategy")
         all_classes+=("${classes[@]}")
         echo ">> fuzz_bcos: batch $batch_idx tally: $(_fuzz_tally "${classes[@]}")"
 
@@ -554,7 +652,7 @@ _fuzz_run() {
                 echo "TRIP: fuzz_bcos: batch $batch_idx tripped the CRASH oracle (nodes actually died) — RG_FUZZ_RESTART_CMD is not set, so re-injecting into a dead node cannot isolate a culprit. Bisection SKIPPED; recording the whole batch range." >&2
                 failures_append "$outdir" "${RG_FUZZ_PROFILE:-unknown}" "exploration" "crash" "高" \
                     "fuzz_bcos.sh oracle trip: seed=$seed idx range [$blo,$bhi] batch=$batch_idx strategy=$strategy — crash-bisection SKIPPED: RG_FUZZ_RESTART_CMD is unset and the nodes are dead. Set RG_FUZZ_RESTART_CMD to a cluster-restart command to isolate a single input." \
-                    "java -jar $FUZZ_JAR fuzz $((bhi + 1)) $seed $strategy | tail -n $((bhi - blo + 1))" \
+                    "java -jar $FUZZ_JAR $gen_cmd $((bhi + 1)) $seed $strategy | tail -n $((bhi - blo + 1))" \
                     "$outdir" "unknown"
             else
                 echo "TRIP: fuzz_bcos: batch $batch_idx tripped an oracle — bisecting to isolate the culprit idx" >&2
@@ -566,26 +664,26 @@ _fuzz_run() {
                     echo "ABORT: fuzz_bcos: batch $batch_idx bisection aborted — RG_FUZZ_RESTART_CMD did not bring the cluster back healthy mid-bisection (last known range [$blo,$bhi])" >&2
                     failures_append "$outdir" "${RG_FUZZ_PROFILE:-unknown}" "exploration" "crash" "高" \
                         "fuzz_bcos.sh oracle trip: seed=$seed idx range [$blo,$bhi] batch=$batch_idx strategy=$strategy — bisection ABORTED: RG_FUZZ_RESTART_CMD failed to restore a healthy cluster mid-bisection" \
-                        "java -jar $FUZZ_JAR fuzz $((bhi + 1)) $seed $strategy | tail -n $((bhi - blo + 1))" \
+                        "java -jar $FUZZ_JAR $gen_cmd $((bhi + 1)) $seed $strategy | tail -n $((bhi - blo + 1))" \
                         "$outdir" "unknown"
                 elif [[ "$blo" == "$bhi" ]]; then
                     resolved=1
                     echo "CULPRIT: fuzz_bcos: seed=$seed idx=$blo (batch $batch_idx)"
                     local culprit_hex
-                    culprit_hex="$("$JAVA_BIN" -jar "$FUZZ_JAR" fuzz $((blo + 1)) "$seed" "$strategy" | tail -n1 | cut -f4)"
-                    local case_file="$SCRIPT_DIR/../scenarios/$(_fuzz_case_filename "$seed" "$blo")"
+                    culprit_hex="$("$JAVA_BIN" -jar "$FUZZ_JAR" "$gen_cmd" $((blo + 1)) "$seed" "$strategy" | tail -n1 | cut -f4)"
+                    local case_file="$SCRIPT_DIR/../scenarios/$(_fuzz_case_filename "$seed" "$blo" "$RG_FUZZ_TRANSPORT")"
                     _fuzz_write_case "$case_file" "${RG_FUZZ_PROFILE:-profiles/production-enterprise.profile}" \
-                        "$culprit_hex" "$seed" "$blo"
+                        "$culprit_hex" "$seed" "$blo" "$RG_FUZZ_TRANSPORT"
                     case_written="$case_file"
                     failures_append "$outdir" "${RG_FUZZ_PROFILE:-unknown}" "exploration" "crash" "高" \
                         "fuzz_bcos.sh oracle trip: seed=$seed idx=$blo strategy=$strategy batch=$batch_idx" \
-                        "java -jar $FUZZ_JAR fuzz $((blo + 1)) $seed $strategy | tail -n1 | cut -f4" \
+                        "java -jar $FUZZ_JAR $gen_cmd $((blo + 1)) $seed $strategy | tail -n1 | cut -f4" \
                         "$outdir" "unknown"
                 else
                     echo "CULPRIT-RANGE: fuzz_bcos: seed=$seed idx range [$blo,$bhi] unresolved (neither half reproduced alone against a confirmed-healthy cluster)"
                     failures_append "$outdir" "${RG_FUZZ_PROFILE:-unknown}" "exploration" "crash" "高" \
                         "fuzz_bcos.sh oracle trip: seed=$seed idx range [$blo,$bhi] UNRESOLVED strategy=$strategy batch=$batch_idx" \
-                        "java -jar $FUZZ_JAR fuzz $((bhi + 1)) $seed $strategy | tail -n $((bhi - blo + 1))" \
+                        "java -jar $FUZZ_JAR $gen_cmd $((bhi + 1)) $seed $strategy | tail -n $((bhi - blo + 1))" \
                         "$outdir" "unknown"
                 fi
             fi
@@ -667,7 +765,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     STRATEGY="${RG_FUZZ_STRATEGY:-both}"
 
     if [[ "$DRY_RUN" == 1 ]]; then
-        _fuzz_print_dry_plan "$BASE_SEED" "$ITERS" "$SEC" "$BATCH" "$STRATEGY"
+        _fuzz_print_dry_plan "$BASE_SEED" "$ITERS" "$SEC" "$BATCH" "$STRATEGY" "$RG_FUZZ_TRANSPORT"
         exit 0
     fi
 
