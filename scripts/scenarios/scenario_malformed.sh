@@ -110,7 +110,10 @@ _mal_positive_control() {
     echo ">> scenario_malformed: [$case_name] positive control: console deploy ${BCOS_CONTRACT_NAME:-HelloWorld} (confirm channel works before tampering)" | tee -a "$log" >&2
     out="$(_mal_console deploy "${BCOS_CONTRACT_NAME:-HelloWorld}")"
     echo "$out" >>"$log"
-    addr="$(printf '%s' "$out" | grep -oE '0x[0-9a-fA-F]{40}' | head -n1)"
+    # Anchored on the "contract address:" label for the same reason scenario_dual_rpc.sh is: the
+    # console prints the 64-hex transaction hash first, whose 40-hex prefix an unanchored grep
+    # happily returns as the contract address.
+    addr="$(printf '%s' "$out" | sed -E -n 's/.*contract address:[[:space:]]*(0x[0-9a-fA-F]{40}).*/\1/p' | head -n1)"
     if [[ -z "$addr" ]]; then
         echo "ERROR: scenario_malformed: [$case_name] positive control failed — could not parse a deployed contract address from console output; channel may be down" | tee -a "$log" >&2
         return 1

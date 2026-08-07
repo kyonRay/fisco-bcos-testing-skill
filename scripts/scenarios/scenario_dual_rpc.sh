@@ -62,6 +62,19 @@
 # best-effort assumption, not a verified contract.
 
 SCENARIO_DRPC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Viem is imported by its bare specifier ("viem/accounts") but with node run from THIS skill's own
+# directory, because ESM resolves a bare specifier against the process CWD — and gate.sh runs from
+# the console directory (the console insists on being invoked from its own dir), where no
+# node_modules exists. Two dead ends already ruled out on a live run: NODE_PATH is ignored by ESM,
+# and importing the absolute directory path fails with "Directory import ... is not supported"
+# because package subpath exports only apply to bare specifiers. So change the CWD instead — the
+# helper scripts below read everything from the environment, so their CWD is otherwise irrelevant.
+if [[ -d "$SCENARIO_DRPC_DIR/../../node_modules/viem" ]]; then
+    SCENARIO_DRPC_NODE_CWD="$(cd "$SCENARIO_DRPC_DIR/../.." && pwd)"
+else
+    SCENARIO_DRPC_NODE_CWD="$PWD"
+fi
 SCENARIO_DRPC_ORACLE_LIB="$SCENARIO_DRPC_DIR/../oracle_lib.sh"
 
 # oracle_lib.sh is NOT sourced here at file scope: it sets `set -euo pipefail` itself, and doing
@@ -171,7 +184,11 @@ _drpc_bcos_deploy_and_call() {
     echo ">> scenario_dual_rpc: BCOS RPC (console, :${BCOS_RPC_URL:-http://127.0.0.1:20200}): deploy ${BCOS_CONTRACT_NAME:-HelloWorld}" | tee -a "$log" >&2
     deploy_out="$(_drpc_console deploy "${BCOS_CONTRACT_NAME:-HelloWorld}")"
     echo "$deploy_out" >> "$log"
-    addr="$(printf '%s' "$deploy_out" | grep -oE '0x[0-9a-fA-F]{40}' | head -n1)"
+    # Anchor to the "contract address:" label, do NOT take the first 40-hex run in the output: the
+    # console prints "transaction hash: 0x<64 hex>" FIRST, and a 64-hex hash trivially contains a
+    # 40-hex prefix — an unanchored grep silently returns the truncated tx hash as the contract
+    # address. A live run did exactly that and then called set() on an address that never existed.
+    addr="$(printf '%s' "$deploy_out" | sed -E -n 's/.*contract address:[[:space:]]*(0x[0-9a-fA-F]{40}).*/\1/p' | head -n1)"
     [[ -n "$addr" ]] || { echo "ERROR: scenario_dual_rpc: could not parse deployed contract address from console output" >&2; return 1; }
 
     echo ">> scenario_dual_rpc: BCOS RPC: call set(42) on $addr" | tee -a "$log" >&2
@@ -190,15 +207,32 @@ _drpc_bcos_deploy_and_call() {
     fi
 
     echo ">> scenario_dual_rpc: BCOS RPC: call get() on $addr" | tee -a "$log" >&2
-    got="$(_drpc_console call "${BCOS_CONTRACT_NAME:-HelloWorld}" "$addr" get | tail -n1 | tr -d '[:space:]')"
+    # The console prints a constant call's result on its own labelled line and then closes the block
+    # with a rule and a trailing blank line, so `tail -n1` reads the blank line, not the value:
+    #     Return values:(42)
+    #     -------------------------------------------------------------
+    #     <blank>
+    # A live run reported get() as '' for exactly that reason. Anchor on the label instead.
+    local get_out
+    get_out="$(_drpc_console call "${BCOS_CONTRACT_NAME:-HelloWorld}" "$addr" get)"
+    echo "$get_out" >> "$log"
+    got="$(printf '%s' "$get_out" | sed -E -n 's/^Return values:\((.*)\)[[:space:]]*$/\1/p' | head -n1 | tr -d '[:space:]')"
     if ! _drpc_assert_return "$got" "42"; then
         echo "FAIL: scenario_dual_rpc: BCOS RPC get() returned '$got', expected '42'" | tee -a "$log" >&2
         return 1
     fi
     echo "OK: scenario_dual_rpc: BCOS RPC path (status=0 return=42)" | tee -a "$log" >&2
 
-    height="$(printf '%s' "$call_out" | sed -E -n 's/.*block number[^0-9]*([0-9]+).*/\1/p' | head -n1)"
-    [[ -n "$height" ]] || { echo "ERROR: scenario_dual_rpc: could not parse block number from console call output" | tee -a "$log" >&2; return 1; }
+    # The console's `call` output carries the transaction hash and status but NO block number, so
+    # the height has to come from the receipt. (The previous `block number` grep matched nothing on
+    # every real run — it was reading a line the console does not print.)
+    local tx_hash receipt_out
+    tx_hash="$(printf '%s' "$call_out" | sed -E -n 's/^transaction hash:[[:space:]]*(0x[0-9a-fA-F]{64}).*/\1/p' | head -n1)"
+    [[ -n "$tx_hash" ]] || { echo "ERROR: scenario_dual_rpc: could not parse the transaction hash from console call output" | tee -a "$log" >&2; return 1; }
+    receipt_out="$(_drpc_console getTransactionReceipt "$tx_hash")"
+    echo "$receipt_out" >> "$log"
+    height="$(printf '%s' "$receipt_out" | sed -E -n 's/.*"blockNumber"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' | head -n1)"
+    [[ -n "$height" ]] || { echo "ERROR: scenario_dual_rpc: could not parse blockNumber from getTransactionReceipt $tx_hash" | tee -a "$log" >&2; return 1; }
     echo "$height"
 }
 
@@ -236,7 +270,21 @@ _drpc_web3_deploy_and_call() {
     tx_hash="$(_drpc_json_hexfield "$resp" result)"
     [[ -n "$tx_hash" ]] || { echo "ERROR: scenario_dual_rpc: eth_sendRawTransaction did not return a tx hash: $resp" | tee -a "$log" >&2; return 1; }
 
-    receipt="$(_drpc_rpc_call "$url" eth_getTransactionReceipt "[\"$tx_hash\"]")"
+    # eth_sendRawTransaction returns as soon as the transaction is accepted into the pool, so the
+    # receipt does not exist yet — an immediate query answers {"result":null}. Wait for the block
+    # that carries it (the production profile seals at consensus.min_seal_time=500ms) instead of
+    # reading that null as a missing status field.
+    receipt=""
+    local waited
+    for waited in $(seq 1 "${RG_WEB3_RECEIPT_WAIT_SEC:-30}"); do
+        receipt="$(_drpc_rpc_call "$url" eth_getTransactionReceipt "[\"$tx_hash\"]")"
+        [[ "$receipt" == *'"result":null'* || "$receipt" == *'"result": null'* ]] || break
+        sleep 1
+    done
+    if [[ "$receipt" == *'"result":null'* || "$receipt" == *'"result": null'* ]]; then
+        echo "ERROR: scenario_dual_rpc: no Web3 receipt for $tx_hash after ${RG_WEB3_RECEIPT_WAIT_SEC:-30}s — the transaction was accepted but never mined" | tee -a "$log" >&2
+        return 1
+    fi
     status="$(_drpc_json_hexfield "$receipt" status)"
     [[ -n "$status" ]] || { echo "ERROR: scenario_dual_rpc: could not parse status from Web3 receipt: $receipt" | tee -a "$log" >&2; return 1; }
     status="$((status))"
@@ -261,20 +309,29 @@ _drpc_web3_deploy_and_call() {
 }
 
 # _drpc_web3_address — derive the funded account's address from WEB3_PRIVATE_KEY via Viem.
+# Errors are reported, never swallowed: see the SCENARIO_DRPC_NODE_CWD note above for what
+# suppressing them cost the first time.
 _drpc_web3_address() {
-    node -e '
+    local out rc=0
+    out="$(cd "$SCENARIO_DRPC_NODE_CWD" && node -e '
         import("viem/accounts").then(({ privateKeyToAccount }) => {
             console.log(privateKeyToAccount(process.env.WEB3_PRIVATE_KEY).address);
-        });
-    ' 2>/dev/null
+        }).catch(e => { console.error(e.message); process.exit(1); });
+    ' 2>&1)" || rc=$?
+    if [[ "$rc" != 0 || -z "$out" ]]; then
+        echo "ERROR: scenario_dual_rpc: viem could not derive the Web3 address (node cwd '$SCENARIO_DRPC_NODE_CWD'): $out" >&2
+        return 1
+    fi
+    printf '%s' "$out"
 }
 
 # _drpc_web3_sign <to|""> <data> <nonce_hex> <chain_id_hex> <gas_price_hex> — print a signed raw
 # transaction hex ready for eth_sendRawTransaction. <to>="" means contract deployment.
 _drpc_web3_sign() {
     local to="$1" data="$2" nonce="$3" chain_id="$4" gas_price="$5"
-    WEB3_TO="$to" WEB3_DATA="$data" WEB3_NONCE="$nonce" WEB3_CHAIN_ID="$chain_id" WEB3_GAS_PRICE="$gas_price" \
-        node -e '
+    local out rc=0
+    out="$(cd "$SCENARIO_DRPC_NODE_CWD" && WEB3_TO="$to" WEB3_DATA="$data" WEB3_NONCE="$nonce" \
+        WEB3_CHAIN_ID="$chain_id" WEB3_GAS_PRICE="$gas_price" node -e '
         import("viem/accounts").then(async ({ privateKeyToAccount }) => {
             const account = privateKeyToAccount(process.env.WEB3_PRIVATE_KEY);
             const tx = {
@@ -286,8 +343,15 @@ _drpc_web3_sign() {
                 gas: 500000n,
             };
             console.log(await account.signTransaction(tx));
-        });
-    ' 2>/dev/null
+        }).catch(e => { console.error(e.message); process.exit(1); });
+    ' 2>&1)" || rc=$?
+    # An empty signature must not be passed on to eth_sendRawTransaction: the node reports it as
+    # "Input too short", which reads like a protocol bug rather than a signing failure.
+    if [[ "$rc" != 0 || -z "$out" ]]; then
+        echo "ERROR: scenario_dual_rpc: viem could not sign the transaction (node cwd '$SCENARIO_DRPC_NODE_CWD'): $out" >&2
+        return 1
+    fi
+    printf '%s' "$out"
 }
 
 # _drpc_dry — print the steps SCENARIO_DRY=1 would take, one per RPC path, without sending
