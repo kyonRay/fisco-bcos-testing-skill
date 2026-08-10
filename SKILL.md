@@ -2,7 +2,7 @@
 name: fisco-bcos-release-gate
 description: >-
   Run a release gate against FISCO-BCOS (AIR mode) that reproduces a production chain's exact
-  config profile locally, replays it through five gate scenario families, and judges the result
+  config profile locally, replays it through four gate scenario families, and judges the result
   under three failure oracles (crash / consensus-halt / state-mismatch), recording any defect
   found. Use this skill WHENEVER the user wants to run a release gate, continuously loop-test a
   build, regression-test before shipping, reproduce a production config profile locally, replay a
@@ -101,16 +101,17 @@ chain starts at `build_chain`'s own default and only reaches the profile's genes
 later `setSystemConfigByKey` call bumps it (which the upgrade scenario's T5 step does explicitly —
 see Step 4).
 
-## gate 场景族(五个)
+## gate 场景族(四个) + `upgrade`(独立入口)
 
 `scripts/gate.sh -p <profile> [--scenarios a,b,c] [--dry-run]` is the orchestrator: bring up the
 cluster via `apply_profile.sh`, run a baseline oracle pass, run each requested scenario family in
 turn (oracle pass after each), tear down, aggregate one exit code — any oracle trip OR any
 scenario failure makes the whole round non-zero.
 
-Five scenario families (`GATE_KNOWN_SCENARIOS` in `gate.sh`; each lives in
+Four scenario families make up `GATE_KNOWN_SCENARIOS` in `gate.sh` (each lives in
 `scripts/scenarios/scenario_<name>.sh` and self-registers into `GATE_SCENARIOS[<name>]` when
-`gate.sh` sources every file under `scripts/scenarios/`):
+`gate.sh` sources every file under `scripts/scenarios/`), plus a fifth self-registering script,
+`scenario_upgrade.sh`, that is deliberately excluded from `GATE_KNOWN_SCENARIOS`:
 
 | name | file | what it does | primary oracle |
 |---|---|---|---|
@@ -118,12 +119,17 @@ Five scenario families (`GATE_KNOWN_SCENARIOS` in `gate.sh`; each lives in
 | `dual_rpc` | `scenario_dual_rpc.sh` | deploys + calls a minimal contract through both BCOS RPC (:20200, tars/console) and Web3 RPC (:8545, curl + RLP), then compares `stateRoot` across both paths | state-mismatch + result assertions |
 | `malformed` | `scenario_malformed.sh` | byte-tampers a signed tx, injects it, asserts a *clean* rejection rather than a crash masquerading as one | crash (false-green guard) |
 | `jsd` | `scenario_jsd.sh` | drives real parallel load through java-sdk-demo's three DMC transfer shapes, DAG on and off, and checks each run's balance-conservation assertion | state-mismatch (balance sum) + crash |
-| `upgrade` | `scenario_upgrade.sh` | replays the T0–T8 version-upgrade timeline: rolling binary swap, `compatibility_version` bump, bugfix-flag flip assertion | all three |
+| `upgrade` † | `scenario_upgrade.sh` | replays the T0–T8 version-upgrade timeline: rolling binary swap, `compatibility_version` bump, bugfix-flag flip assertion | all three |
+
+† not a `GATE_KNOWN_SCENARIOS` member — selecting it via `--scenarios upgrade` is a hard rejection
+(exit 2; see "`upgrade` is not a gate-sweep scenario" below), not a swept family. It is a separate,
+directly-invoked entry point.
 
 **Weighting per profile** (every profile still gets all four families run for real, never a smoke
 pass — `gate.sh -p <profile>` covers `ut`/`dual_rpc`/`malformed`/`jsd`; `upgrade` is driven directly per
-the note below, since `gate.sh`'s own bare-dispatch loop SKIPs it. The difference across profiles
-is depth on `upgrade` and whether the exploration layer attaches):
+the note below, since selecting it through `gate.sh --scenarios` is a hard rejection, not something
+the bare-dispatch loop can run. The difference across profiles is depth on `upgrade` and whether the
+exploration layer attaches):
 
 - `production-enterprise`: full T0–T8 timeline against real old/new binaries, **plus** the
   exploration layer (Step 6).
@@ -280,7 +286,8 @@ At the end of a gate round (or an exploration session), assemble:
 | `scripts/oracle_lib.sh` / `oracle_crash.sh` / `oracle_liveness.sh` / `oracle_stateroot.sh` | the three failure oracles |
 | `scripts/run_case.sh` | replay one `scenarios/*.case` regression fixture |
 | `scripts/failures_lib.sh` / `report_defects.sh` | local defect sink + Tencent smartsheet sync (报告) |
-| `scripts/scenarios/scenario_ut.sh` / `scenario_dual_rpc.sh` / `scenario_malformed.sh` / `scenario_jsd.sh` / `scenario_upgrade.sh` | the five gate scenario families (gate 场景族) |
+| `scripts/scenarios/scenario_ut.sh` / `scenario_dual_rpc.sh` / `scenario_malformed.sh` / `scenario_jsd.sh` | the four gate scenario families (gate 场景族) |
+| `scripts/scenarios/scenario_upgrade.sh` | the `upgrade` timeline — a separate, directly-invoked entry point, not a `GATE_KNOWN_SCENARIOS` member |
 | `profiles/*.profile` | the 6 hand-maintained config profiles (加载 profile) |
 | `scenarios/*.case` | regression fixtures distilled from confirmed exploration-layer findings (飞轮沉淀) |
 | `references/oracle-detection.md` | 三 oracle: decision logic, default thresholds, how to tune `RG_STALL_SEC` / `RG_ONCE_WAIT_SEC` / `RG_HANG_SEC` |

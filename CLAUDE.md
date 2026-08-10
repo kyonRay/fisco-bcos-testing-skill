@@ -5,8 +5,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this repo is
 
 A **Claude Code skill** (`fisco-bcos-release-gate`) — a release-gate test harness for FISCO-BCOS
-(AIR mode). It reproduces a production chain's exact config profile locally, runs five gate
-scenario families against it, and judges each run under three failure oracles (crash /
+(AIR mode). It reproduces a production chain's exact config profile locally, runs four gate
+scenario families against it (plus a separate, directly-invoked `upgrade` entry point — not a
+`GATE_KNOWN_SCENARIOS` member), and judges each run under three failure oracles (crash /
 consensus-halt / state-mismatch), recording any defect found.
 
 This repo is normally checked out **nested inside a FISCO-BCOS source tree** at
@@ -76,9 +77,10 @@ Three layers, each loaded later and costing more tokens than the last:
 
 `scripts/` holds every executable. **Two directories are both named "scenarios" — do not conflate
 them**:
-- `scripts/scenarios/scenario_<name>.sh` — the 5 general-purpose gate scenario families
-  (`ut`/`dual_rpc`/`malformed`/`jsd`/`upgrade`), self-registering into `gate.sh`'s `GATE_SCENARIOS` map
-  when sourced.
+- `scripts/scenarios/scenario_<name>.sh` — the 4 general-purpose gate scenario families
+  (`ut`/`dual_rpc`/`malformed`/`jsd`, i.e. `GATE_KNOWN_SCENARIOS`), plus `scenario_upgrade.sh` — a
+  separate, directly-invoked entry point deliberately excluded from `GATE_KNOWN_SCENARIOS`. All 5
+  files self-register into `gate.sh`'s `GATE_SCENARIOS` map when sourced.
 - `scenarios/*.case` (top-level) — narrow, one-fixture-per-confirmed-failure regression files (see
   `scenarios/README.md`). `gate.sh` does not currently sweep this directory automatically.
 

@@ -2,7 +2,7 @@
 
 A [Claude Code](https://claude.com/claude-code) skill that runs a release gate against
 **FISCO-BCOS** (AIR mode): reproduce a production chain's exact config profile locally, replay it
-through five gate scenario families, and judge the result under three failure oracles — crash,
+through four gate scenario families, and judge the result under three failure oracles — crash,
 consensus-halt, state-mismatch — recording any defect found.
 
 It has two legs. A **deterministic gate** (`scripts/gate.sh`) — pure bash, no model in the loop,
@@ -28,12 +28,16 @@ think to test, delegating attack mechanics to the sibling `fisco-bcos-testing` a
   height flat past `RG_STALL_SEC` while transactions are pending), state-mismatch (`stateRoot`
   divergence across nodes) — each judged by an IO-free decision function, unit-tested directly.
   No log-grep-for-`ERROR` oracle by design (noisy, false-positive-prone).
-- **Five gate scenario families** — `ut` (every module's UT binary via the sibling
+- **Four gate scenario families** — `ut` (every module's UT binary via the sibling
   `fisco-bcos-testing` skill), `dual_rpc` (BCOS RPC vs Web3 RPC stateRoot comparison), `malformed`
   (byte-tampered tx, asserts clean rejection not a crash-masquerading-as-one), `jsd`
   (java-sdk-demo's three DMC transfer shapes under real parallel load, DAG on and off, each checked
-  against its own balance-conservation assertion), `upgrade` (the production profile's T0-T8
-  version-upgrade timeline).
+  against its own balance-conservation assertion).
+- **A separate `upgrade` entry point** — the production profile's T0-T8 version-upgrade timeline
+  (`scenario_upgrade.sh`). Not one of the four gate scenario families: it needs old/new binaries
+  and a target version `gate.sh`'s bare-dispatch loop can't supply, so selecting it via
+  `--scenarios upgrade` is a hard rejection (exit 2) rather than something the sweep runs; drive it
+  directly instead (see `references/upgrade-path.md`).
 - **6 hand-curated profiles** — one real captured production snapshot
   (`production-enterprise`) plus 5 archetypes covering SM-crypto, rPBFT scale, fresh install,
   EVM-full, and a long-distance-upgrade starting point.
@@ -124,12 +128,12 @@ fisco-bcos-release-gate/
 │   ├── run_case.sh                       replay one scenarios/*.case regression fixture
 │   ├── failures_lib.sh                   local failures.jsonl sink (failures_append)
 │   ├── report_defects.sh                 sync unreported failures.jsonl rows to the Tencent smartsheet
-│   └── scenarios/                        the 5 general-purpose gate scenario families
+│   └── scenarios/                        the 4 general-purpose gate scenario families, + upgrade
 │       ├── scenario_ut.sh                runs every module's UT binary (crash oracle)
 │       ├── scenario_dual_rpc.sh          BCOS RPC vs Web3 RPC deploy+call, stateRoot comparison
 │       ├── scenario_malformed.sh         byte-tampered tx, asserts clean rejection
 │       ├── scenario_jsd.sh               java-sdk-demo DMC load, balance conservation (needs JSD_DIR)
-│       └── scenario_upgrade.sh           T0-T8 version-upgrade timeline (production-enterprise only)
+│       └── scenario_upgrade.sh           T0-T8 upgrade timeline; separate entry point, not a GATE_KNOWN_SCENARIOS member
 ├── profiles/                             6 hand-maintained captured/archetype .profile files
 │   ├── production-enterprise.profile     the one real captured snapshot — the anchor
 │   ├── sm-gov.profile
@@ -151,17 +155,19 @@ fisco-bcos-release-gate/
 
 ## Design principles
 
-- **Two directories, both named "scenarios," different jobs.** `scripts/scenarios/` holds the 5
-  broad `scenario_*.sh` families run every gate round; top-level `scenarios/` holds narrow,
+- **Two directories, both named "scenarios," different jobs.** `scripts/scenarios/` holds 4 broad
+  `scenario_*.sh` families run every gate round, plus `scenario_upgrade.sh` — a separate,
+  directly-invoked entry point, not swept by `gate.sh`; top-level `scenarios/` holds narrow,
   one-fixture-per-confirmed-failure `.case` files. See `scenarios/README.md`.
 - **Facts don't get baked in.** Methodology is fixed; per-release facts (feature-flag names, exact
   line numbers, current version strings) are re-derived at run time — grep `Features.cpp`, run
   `listSystemConfigs`, read the current `config.genesis` — never hardcoded into a script or doc.
-- **Stated accurately, not aspirationally.** Known gaps (`gate.sh`'s default sweep SKIPs `upgrade`
-  rather than failing on its missing args — it needs old/new binaries + a target version `gate.sh`
-  can't supply bare, so it's driven directly instead; `gate.sh` doesn't auto-replay
+- **Stated accurately, not aspirationally.** Known gaps (`gate.sh` doesn't auto-replay
   `scenarios/*.case`; `cluster_up.sh` has no `compatibility_version` passthrough yet) are
-  documented as current state in `SKILL.md`, not silently worked around or claimed fixed.
+  documented as current state in `SKILL.md`, not silently worked around or claimed fixed. `upgrade`
+  itself is not a gap: it needs old/new binaries + a target version the bare-dispatch loop can't
+  supply, so `gate.sh` rejects `--scenarios upgrade` outright (exit 2) rather than silently
+  skipping it, and it's driven directly instead (see `references/upgrade-path.md`).
 
 ---
 
