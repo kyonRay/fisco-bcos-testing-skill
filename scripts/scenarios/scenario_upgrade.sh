@@ -289,12 +289,14 @@ _upg_rpc_current_height() {
     printf '%d\n' "$hex"
 }
 
-# _upg_run_oracle_triad <phase-label> <rpc_url> <pid...> — one bounded pass of all three
-# release-gate oracles (crash / liveness / stateroot), matching gate.sh's own run_oracles_once
-# exactly — T1/T7 are "baseline gate" and "re-run gate" checkpoints, not crash-only spot checks.
+# _upg_run_oracle_triad <phase-label> <rpc_url> <node_dir> <pid...> — one bounded pass of all
+# three release-gate oracles (crash / liveness / stateroot), matching gate.sh's own
+# run_oracles_once exactly — T1/T7 are "baseline gate" and "re-run gate" checkpoints, not
+# crash-only spot checks. node_dir feeds _run_stateroot_oracle's multi-node discovery
+# (_discover_stateroot_urls), the same shared runner gate.sh/run_case.sh/fuzz_bcos.sh use.
 _upg_run_oracle_triad() {
-    local phase="$1" rpc_url="$2"
-    shift 2
+    local phase="$1" rpc_url="$2" node_dir="$3"
+    shift 3
     local trc=0 height
     bash "$SCENARIO_UPG_DIR/../oracle_crash.sh" --once "$@" || trc=1
     bash "$SCENARIO_UPG_DIR/../oracle_liveness.sh" -r "$rpc_url" || trc=1
@@ -303,7 +305,15 @@ _upg_run_oracle_triad() {
         echo "ERROR: scenario_upgrade: could not read block height from $rpc_url for stateroot oracle ($phase)" >&2
         trc=1
     else
-        bash "$SCENARIO_UPG_DIR/../oracle_stateroot.sh" -b "$height" -r "$rpc_url" || trc=1
+        local sr_rc=0
+        _run_stateroot_oracle "$height" "$node_dir" "" || sr_rc=$?
+        if [[ "$sr_rc" == 3 ]]; then
+            echo "ERROR: scenario_upgrade: stateroot ($phase): <2 node RPCs discovered under $node_dir" >&2
+            trc=1
+        elif [[ "$sr_rc" == 1 ]]; then
+            echo "FAIL: scenario_upgrade: stateroot divergence (fork) detected during $phase @ height $height" >&2
+            trc=1
+        fi
     fi
     return $trc
 }
@@ -439,6 +449,10 @@ scenario_upgrade_run() {
     # endpoint used by T1/T7 below; it is distinct from the per-node BCOS RPC ports (_upg_rpc_url_for)
     # the T2-T4 no-fork check samples individually.
     source "$SCENARIO_UPG_DIR/../profile_lib.sh"
+    # Sourced here, not at file scope — same convention scenario_dual_rpc.sh's own
+    # SCENARIO_DRPC_ORACLE_LIB source uses (see its comment): only reached on a real run, never by
+    # SCENARIO_DRY=1 or by merely sourcing this file.
+    source "$SCENARIO_UPG_DIR/../oracle_lib.sh"
     profile_load "$profile"
     local web3_port="${PROFILE_CONFIG[web3_rpc.listen_port]:-8545}"
     local rpc_url="http://127.0.0.1:${web3_port}"
@@ -458,7 +472,7 @@ scenario_upgrade_run() {
     # T1 itself already failed, so that branch's `else` printed "OK: T7 consistent with T1" and rc
     # stayed 0 even with a live crash/consensus-halt/state-mismatch present at (or caused by) the
     # very start of the upgrade. That is exactly the false-green this scenario exists to catch.
-    if ! _upg_run_oracle_triad "T1-baseline" "$rpc_url" "${pids[@]}"; then
+    if ! _upg_run_oracle_triad "T1-baseline" "$rpc_url" "$node_dir_root" "${pids[@]}"; then
         echo "FAIL: scenario_upgrade: T1 baseline gate failed (chain unhealthy before/at the start of the upgrade)" >&2
         rc=1
         t1_rc=1
@@ -569,7 +583,7 @@ scenario_upgrade_run() {
         echo "FAIL: scenario_upgrade: T7 found no live node PIDs at all (all nodes crashed during upgrade?)" >&2
         t7_rc=1
     else
-        _upg_run_oracle_triad "T7-rerun" "$rpc_url" "${pids[@]}" || t7_rc=1
+        _upg_run_oracle_triad "T7-rerun" "$rpc_url" "$node_dir_root" "${pids[@]}" || t7_rc=1
     fi
     # This is an ADDITIONAL signal on top of T1's own independent pass/fail check above (T1
     # failing already set rc=1 there, regardless of what T7 does) — it specifically catches a

@@ -148,6 +148,7 @@ if [[ "$DRY_RUN" == 1 ]]; then
             echo "  needs-args: $name is SKIPped by the default bare-dispatch loop (requires old/new binaries + target version) — run it directly, see SKILL.md"
         fi
     done
+    echo "stateroot: runtime multi-node discovery under <outdir>/127.0.0.1 (_discover_stateroot_urls), fed to _run_stateroot_oracle"
     exit 0
 fi
 
@@ -172,6 +173,7 @@ NODE_DIR="$CLUSTER_OUTDIR_ABS/127.0.0.1"
 # already parsed successfully once by apply_profile.sh above — verified only against a live
 # chain, not by this task's own (dry-run-only) tests.
 source "$SCRIPT_DIR/profile_lib.sh"
+source "$SCRIPT_DIR/oracle_lib.sh"
 profile_load "$PROFILE_PATH"
 web3_port="${PROFILE_CONFIG[web3_rpc.listen_port]:-8545}"
 RPC_URL="http://127.0.0.1:${web3_port}"
@@ -248,8 +250,13 @@ run_oracles_once() {
         echo "ERROR: could not read block height from $RPC_URL for stateroot oracle ($phase)" >&2
         rc=1
     else
-        echo ">> oracle check ($phase): stateroot @ $height"
-        if ! bash "$SCRIPT_DIR/oracle_stateroot.sh" -b "$height" -r "$RPC_URL"; then
+        echo ">> oracle check ($phase): stateroot @ $height (multi-node discovery under $NODE_DIR)"
+        local sr_rc=0
+        _run_stateroot_oracle "$height" "$NODE_DIR" "${RG_FUZZ_STATEROOT_URLS:-}" || sr_rc=$?
+        if [[ "$sr_rc" == 3 ]]; then
+            echo "ERROR: stateroot ($phase): <2 node RPCs discovered under $NODE_DIR" >&2
+            rc=1
+        elif [[ "$sr_rc" == 1 ]]; then
             rc=1
             failures_append "$FAILURES_OUTDIR" "$profile_name" "$scenario_label" "state-mismatch" "高" \
                 "oracle_stateroot tripped during $phase @ height $height" \

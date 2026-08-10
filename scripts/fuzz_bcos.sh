@@ -62,12 +62,13 @@
 #                             means the shell never parses the body at all. Preflight is identical
 #                             to web3's (same eth_chainId check — see _fuzz_preflight's `web3*`
 #                             branch).
-#   RG_FUZZ_STATEROOT_URLS  comma-separated EXTRA node Web3 RPC URLs to compare stateRoot against
-#                         RG_FUZZ_WEB3_URL. GAP: this driver has no profile/cluster-layout wiring
-#                         to auto-discover other nodes' ports (see run_case.sh / gate.sh's own
-#                         identical documented gap for oracle_stateroot.sh) — unset (the default)
-#                         means the stateroot oracle is SKIPPED and only crash+liveness run; set
-#                         this to enable it once you know the other nodes' RPC URLs.
+#   RG_FUZZ_STATEROOT_URLS  comma-separated EXTRA node Web3 RPC URLs to compare stateRoot against,
+#                         on top of whatever _run_stateroot_oracle (scripts/oracle_lib.sh) already
+#                         discovers under NODE_DIR via _discover_stateroot_urls. The stateroot
+#                         oracle now always runs (see _fuzz_oracle_check_once) — fewer than 2 node
+#                         RPCs found (NODE_DIR's own layout plus this override, combined) is an
+#                         infrastructure failure that terminates the whole fuzz run immediately,
+#                         not a skip.
 #   RG_FUZZ_ITERS         batches to run (default 20). Ignored when RG_FUZZ_SEC is set and > 0.
 #   RG_FUZZ_SEC           wall-clock budget in seconds; if set and > 0, takes PRECEDENCE over
 #                         RG_FUZZ_ITERS — an explicit time box is honored regardless of how many
@@ -106,12 +107,11 @@
 #                         $SCRIPT_DIR/../tools/tamper-fuzz/build/libs/tamper-fuzz-all.jar)
 #   JAVA_BIN              java executable (default `java` on PATH)
 #
-# Oracle wiring: crash (scripts/oracle_crash.sh --once) and liveness (scripts/oracle_liveness.sh)
-# always run, once per batch. stateroot (scripts/oracle_stateroot.sh) runs only when
-# RG_FUZZ_STATEROOT_URLS is set — see that env var's GAP note above. This mirrors the same honesty
-# standard scenario_malformed.sh and run_case.sh's own documented GAPs follow: an oracle that
-# cannot be meaningfully wired with the information this script has is skipped and SAID so, not
-# silently assumed clean.
+# Oracle wiring: crash (scripts/oracle_crash.sh --once), liveness (scripts/oracle_liveness.sh),
+# and stateroot (_run_stateroot_oracle, scripts/oracle_lib.sh) ALL always run, once per batch.
+# stateroot discovers this cluster's node RPC URLs under NODE_DIR at runtime (plus any
+# RG_FUZZ_STATEROOT_URLS extras) — fewer than 2 found is an infrastructure failure that terminates
+# the fuzz run immediately (see _fuzz_oracle_check_once), not a silent skip.
 #
 # Bisection (single-input-causality assumption): when a batch trips an oracle, this driver does
 # NOT assume every mutant in the batch is guilty — it binary-searches the batch's idx range
@@ -146,6 +146,7 @@ if (( BASH_VERSINFO[0] < 4 )); then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/oracle_lib.sh"
 
 NODE_DIR="${NODE_DIR:-./nodes-release-gate/127.0.0.1}"
 BCOS_RPC_URL="${BCOS_RPC_URL:-http://127.0.0.1:20200}"
@@ -420,9 +421,11 @@ _fuzz_rpc_height() {
     printf '%d\n' "$hex"
 }
 
-# _fuzz_oracle_check_once <label> — one bounded pass of crash + liveness (+ stateroot, only if
-# RG_FUZZ_STATEROOT_URLS is set — see header GAP), against NODE_PIDS discovered once at preflight.
-# Returns non-zero iff any oracle tripped.
+# _fuzz_oracle_check_once <label> — one bounded pass of crash + liveness + stateroot, against
+# NODE_PIDS discovered once at preflight. Returns non-zero iff any oracle tripped. A stateroot
+# infrastructure failure (rc=3, <2 node RPCs discoverable — see _run_stateroot_oracle) is NOT
+# folded into that non-zero return: it exits the whole fuzz run immediately instead (Design
+# Decision rev3 — see the call site below), since it means no finding in this run can be trusted.
 #
 # STDOUT CONTRACT: oracle_crash.sh / oracle_liveness.sh / oracle_stateroot.sh communicate
 # pass/fail via EXIT CODE, but they also print human-readable lines (e.g. oracle_crash.sh's
@@ -452,25 +455,27 @@ _fuzz_oracle_check_once() {
         rc=1
         _FUZZ_LAST_LIVENESS_TRIPPED=1
     fi
-    if [[ -n "${RG_FUZZ_STATEROOT_URLS:-}" ]]; then
-        echo ">> fuzz_bcos: oracle check ($label): stateroot" >&2
-        local height
-        height="$(_fuzz_rpc_height)"
-        if [[ -z "$height" ]]; then
-            echo "WARN: fuzz_bcos: could not read block height for stateroot oracle ($label)" >&2
-        else
-            local -a urls=("$RG_FUZZ_WEB3_URL") extra rflags=()
-            IFS=',' read -r -a extra <<< "$RG_FUZZ_STATEROOT_URLS"
-            urls+=("${extra[@]}")
-            local u
-            for u in "${urls[@]}"; do rflags+=(-r "$u"); done
-            if ! bash "$SCRIPT_DIR/oracle_stateroot.sh" -b "$height" "${rflags[@]}" >&2; then
-                rc=1
-                _FUZZ_LAST_STATEROOT_TRIPPED=1
-            fi
-        fi
+    echo ">> fuzz_bcos: oracle check ($label): stateroot" >&2
+    local height
+    height="$(_fuzz_rpc_height)"
+    if [[ -z "$height" ]]; then
+        echo "WARN: fuzz_bcos: could not read block height for stateroot oracle ($label)" >&2
     else
-        echo ">> fuzz_bcos: oracle check ($label): stateroot SKIPPED (GAP: no per-node RPC URLs wired — set RG_FUZZ_STATEROOT_URLS)" >&2
+        local sr_rc=0
+        _run_stateroot_oracle "$height" "$NODE_DIR" "${RG_FUZZ_STATEROOT_URLS:-}" >&2 || sr_rc=$?
+        if [[ "$sr_rc" == 3 ]]; then
+            # Design Decision (rev3): infrastructure failure — <2 node RPCs discovered — is NOT a
+            # scoring event and must NOT be treated as a non-scoring warning either. It terminates
+            # the whole fuzz run immediately: a driver that cannot even discover a second node's
+            # RPC to compare against has no basis for judging ANY of its findings, past or future
+            # in this run, so it stops here rather than continuing to fuzz on an unverifiable
+            # cluster (see fuzz_bcos.sh's own header for the exit codes this run uses).
+            echo "ERROR: fuzz_bcos: stateroot ($label): <2 node RPCs discovered under $NODE_DIR — infrastructure failure, terminating the fuzz run" >&2
+            exit 1
+        elif [[ "$sr_rc" == 1 ]]; then
+            rc=1
+            _FUZZ_LAST_STATEROOT_TRIPPED=1
+        fi
     fi
     return $rc
 }

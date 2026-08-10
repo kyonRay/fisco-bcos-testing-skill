@@ -13,6 +13,8 @@ if (( BASH_VERSINFO[0] < 4 )); then
     return 1 2>/dev/null || exit 1
 fi
 
+_ORACLE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # oracle_liveness_decide <prev_height> <cur_height> <elapsed_s> <has_pending>
 # Halt (return 1) when there is pending work, the stall threshold has been
 # exceeded, and the height has not advanced. Threshold defaults to 30s,
@@ -82,4 +84,27 @@ _discover_stateroot_urls() {
     n="$(printf '%s\n' "$out" | awk 'NF' | wc -l | tr -d ' ')"
     [[ "${n:-0}" -ge 2 ]] || { echo "ERROR: _discover_stateroot_urls: found ${n:-0} URL(s) under $node_dir, need >=2" >&2; return 3; }
     printf '%s\n' "$out"
+}
+
+# _run_stateroot_oracle <height> <node_dir> [extra_csv] — shared stateroot-oracle runner used by
+# every call site (gate.sh, run_case.sh, scenario_upgrade.sh, fuzz_bcos.sh): discover this
+# cluster's live Web3 RPC URLs via _discover_stateroot_urls, then feed ALL of them to
+# oracle_stateroot.sh (or ${STATEROOT_ORACLE} when a test stubs it) as repeated -r flags, so a
+# real cross-node stateRoot comparison actually happens instead of the single-URL "nothing to
+# compare" short-circuit every call site used to hit individually.
+#
+# rc: 0 clean, 1 divergence (oracle_stateroot_decide tripped), 3 infrastructure (<2 node RPCs
+# discovered under node_dir — see _discover_stateroot_urls).
+#
+# CRITICAL: the discover rc is captured via a plain command substitution `urls_text="$(...)"`
+# BEFORE mapfile ever runs — `mapfile -t urls < <(_discover_stateroot_urls ...)` would run the
+# discovery in a process-substitution subshell whose own exit status never reaches `$?` here (the
+# `<()` pipeline's rc is invisible to the reading command), silently swallowing rc=3 and letting a
+# single-node cluster fall through as if it were clean. Do not "simplify" this back to a one-liner.
+_run_stateroot_oracle() {
+    local height="$1" node_dir="$2" extra="${3:-}" urls_text
+    if ! urls_text="$(_discover_stateroot_urls "$node_dir" "$extra")"; then return 3; fi
+    local -a urls=() rflags=(); mapfile -t urls <<<"$urls_text"
+    local u; for u in "${urls[@]}"; do [[ -n "$u" ]] && rflags+=(-r "$u"); done
+    bash "${STATEROOT_ORACLE:-$_ORACLE_LIB_DIR/oracle_stateroot.sh}" -b "$height" "${rflags[@]}"
 }

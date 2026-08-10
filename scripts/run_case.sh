@@ -182,6 +182,7 @@ CLUSTER_OUTDIR_ABS="$(cd "$CLUSTER_OUTDIR" && pwd)"
 NODE_DIR="$CLUSTER_OUTDIR_ABS/127.0.0.1"
 
 source "$SCRIPT_DIR/profile_lib.sh"
+source "$SCRIPT_DIR/oracle_lib.sh"
 profile_load "$CASE_PROFILE"
 web3_port="${PROFILE_CONFIG[web3_rpc.listen_port]:-8545}"
 RPC_URL="http://127.0.0.1:${web3_port}"
@@ -228,14 +229,20 @@ if [[ -z "$height" ]]; then
     echo "ERROR: could not read block height from $RPC_URL for stateroot oracle" >&2
     stateroot_tripped=1
 else
-    # GAP: only one -r URL is passed, mirroring gate.sh's run_oracles_once (see
-    # scripts/gate.sh's oracle-check block) — oracle_stateroot.sh needs at least 2 to compare and
-    # short-circuits OK (exit 0, "nothing to compare") with just one, so this stateroot check can
-    # never actually observe a real cross-node divergence as written. Fixing this needs sourcing
-    # a second node's RPC URL from the discovered cluster layout — a known, repo-wide deferred
-    # item (gate.sh has the identical gap) — not implemented here; documenting it so it isn't
-    # mistaken for real coverage.
-    bash "$SCRIPT_DIR/oracle_stateroot.sh" -b "$height" -r "$RPC_URL" || stateroot_tripped=1
+    echo ">> stateroot @ $height (multi-node discovery under $NODE_DIR)"
+    sr_rc=0
+    _run_stateroot_oracle "$height" "$NODE_DIR" "" || sr_rc=$?
+    if [[ "$sr_rc" == 3 ]]; then
+        # Distinct exit path from a genuine oracle trip: <2 node RPCs discovered is an
+        # infrastructure failure, not a case verdict — case_verdict has no way to say "the
+        # stateroot oracle was never meaningfully consulted", so this exits directly instead of
+        # folding it into stateroot_tripped and reporting a misleading CASE: FAIL.
+        echo "ERROR: run_case: stateroot: <2 node RPCs discovered under $NODE_DIR — infrastructure failure, refusing to judge $CASE_PATH" >&2
+        bash "$NODE_DIR/stop_all.sh" || true
+        exit 1
+    elif [[ "$sr_rc" == 1 ]]; then
+        stateroot_tripped=1
+    fi
 fi
 
 bash "$NODE_DIR/stop_all.sh" || true
