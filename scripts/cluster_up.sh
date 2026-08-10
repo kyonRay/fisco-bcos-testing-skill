@@ -4,11 +4,13 @@
 # Wraps:  build_chain.sh (generate)  ->  start_all.sh (launch)  ->  poll Web3 RPC (ready)
 #
 # Usage:
-#   cluster_up.sh [-n NODES] [-e FISCO_BIN] [-o OUTDIR] [-p P2P,RPC] [-s] [-d] [-h]
+#   cluster_up.sh [-n NODES] [-e FISCO_BIN] [-o OUTDIR] [-p P2P,RPC] [-v VERSION] [-w WEB3_BASE] [-s] [-d] [-h]
 #     -n  node count            (default 4)
 #     -e  fisco-bcos binary     (default: build/fisco-bcos-air/fisco-bcos under repo root)
 #     -o  output dir            (default ./nodes-test)
 #     -p  start ports "P2P,RPC" (default 30300,20200; Web3 RPC = RPC offset, node0 = 8545 by config)
+#     -v  build_chain compatibility_version (default: build_chain's own default; passed as -v)
+#     -w  Web3 RPC base port    (default 8545; node<i> gets base+i)
 #     -s  SM (国密) mode
 #     -d  download a RELEASE binary via build_chain (omits -e). Released behavior only — a release
 #         binary has NO unreleased/unmerged fixes; for those, compile from source and use -e.
@@ -17,19 +19,46 @@
 # Tear down later with:  <OUTDIR>/127.0.0.1/stop_all.sh
 set -euo pipefail
 
+# Requires bash 4+ (mirrors the release-gate skill's scripts). Fail clearly instead of a cryptic
+# parse error on stock macOS bash 3.2.
+if (( BASH_VERSINFO[0] < 4 )); then
+    echo "cluster_up.sh requires bash >= 4 (found ${BASH_VERSION}). On macOS: brew install bash." >&2
+    exit 1
+fi
+
 NODES=4
 OUTDIR="./nodes-test"
 PORTS="30300,20200"
 SM_FLAG=""
 FISCO_BIN=""
 DOWNLOAD=0
+COMPAT_VERSION=""
+WEB3_BASE=8545
 
-while getopts "n:e:o:p:sdh" opt; do
+# Fill global array BUILD_CHAIN_ARGV for the build_chain.sh invocation. bash 4.0 target: a global
+# array, not a nameref (`declare -n` needs bash 4.3). Empty version/binary omit -v/-e.
+#
+# `return 0` is required, not decorative: under set -euo pipefail, if this function's LAST
+# executed statement were the trailing `[[ -n "$5" ]] && ...` and $5 (SM_FLAG) were empty — the
+# default, since cluster_up.sh only sets it via -s — the function would return 1, and since every
+# call site here invokes it as a bare top-level statement, that would abort the whole script on
+# every non-SM run.
+_cluster_up_build_chain_argv() {
+    BUILD_CHAIN_ARGV=(-p "$2" -l "127.0.0.1:$1" -o "$3")
+    [[ -n "$4" ]] && BUILD_CHAIN_ARGV+=(-e "$4")
+    [[ -n "$6" ]] && BUILD_CHAIN_ARGV+=(-v "$6")
+    [[ -n "$5" ]] && BUILD_CHAIN_ARGV+=("$5")
+    return 0
+}
+
+while getopts "n:e:o:p:v:w:sdh" opt; do
   case "$opt" in
     n) NODES="$OPTARG" ;;
     e) FISCO_BIN="$OPTARG" ;;
     o) OUTDIR="$OPTARG" ;;
     p) PORTS="$OPTARG" ;;
+    v) COMPAT_VERSION="$OPTARG" ;;
+    w) WEB3_BASE="$OPTARG" ;;
     s) SM_FLAG="-s" ;;
     d) DOWNLOAD=1 ;;
     h) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -75,11 +104,11 @@ if pgrep -fl '[f]isco-bcos' >/dev/null 2>&1; then
 fi
 
 echo ">> generating $NODES-node AIR cluster into $OUTDIR (ports $PORTS${SM_FLAG:+ , SM})"
-if [ "$DOWNLOAD" = 1 ]; then
-  bash "$BUILD_CHAIN" -p "$PORTS" -l "127.0.0.1:$NODES" -o "$OUTDIR" $SM_FLAG
-else
-  bash "$BUILD_CHAIN" -p "$PORTS" -l "127.0.0.1:$NODES" -o "$OUTDIR" -e "$FISCO_BIN" $SM_FLAG
-fi
+# Route BOTH the download (-d, FISCO_BIN empty) and non-download (FISCO_BIN set) cases through the
+# same builder + quoted array expansion — the builder itself omits -e when $4 is empty, so one call
+# site covers both without duplicating the invocation.
+_cluster_up_build_chain_argv "$NODES" "$PORTS" "$OUTDIR" "${FISCO_BIN:-}" "$SM_FLAG" "${COMPAT_VERSION:-}" "$WEB3_BASE"
+bash "$BUILD_CHAIN" "${BUILD_CHAIN_ARGV[@]}"
 
 # Enable the Web3 RPC on every node — the generated config defaults to [web3_rpc] enable=false,
 # and the readiness probe (and any Ethereum-tool testing) needs :8545. Mirrors what CI does.
@@ -88,8 +117,8 @@ fi
 # increments the P2P and native-RPC ports, because the Web3 service ships disabled and never binds.
 # Enabling it on all nodes without renumbering therefore kills every node but the first with
 # "acceptor bind failed" (HttpServer.cpp). Renumber as we enable: node<i> gets WEB3_BASE+i, the
-# same convention the native RPC port already follows.
-WEB3_BASE=8545
+# same convention the native RPC port already follows. WEB3_BASE defaults to 8545, overridable
+# via -w.
 echo ">> enabling Web3 RPC ([web3_rpc] enable=true, port $WEB3_BASE+i) on all nodes"
 for cfg in "$OUTDIR"/127.0.0.1/node*/config.ini; do
   [ -f "$cfg" ] || continue
@@ -130,9 +159,9 @@ fi
 echo ">> $started/$NODES nodes running"
 
 # Readiness: poll the node0 Web3 RPC until eth_blockNumber returns a JSON result (not conn-refused).
-# Web3 port for node0 defaults to 8545 in the generated config; native RPC is the -p RPC base.
+# Web3 port for node0 is WEB3_BASE (default 8545, overridable via -w); native RPC is the -p RPC base.
 RPC_BASE="${PORTS##*,}"
-WEB3_PORT=8545
+WEB3_PORT="$WEB3_BASE"
 echo ">> waiting for RPC to answer (Web3 :$WEB3_PORT, native :$RPC_BASE) ..."
 ready=0
 for i in $(seq 1 60); do

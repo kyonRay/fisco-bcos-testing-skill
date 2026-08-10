@@ -14,6 +14,13 @@
 #   BUILD_DIR   build tree to search (default: build under repo root)
 set -euo pipefail
 
+# Requires bash 4+ (mirrors the release-gate skill's scripts and cluster_up.sh). Fail clearly
+# instead of a cryptic parse error on stock macOS bash 3.2.
+if (( BASH_VERSINFO[0] < 4 )); then
+    echo "run_ut.sh requires bash >= 4 (found ${BASH_VERSION}). On macOS: brew install bash." >&2
+    exit 1
+fi
+
 [ $# -ge 1 ] || { echo "usage: run_ut.sh <module> [boost-test-args...]" >&2; exit 2; }
 MODULE="$1"; shift
 
