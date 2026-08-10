@@ -167,16 +167,20 @@ bash "$APPLY_PROFILE" -p "$PROFILE_PATH" -o "$CLUSTER_OUTDIR"
 CLUSTER_OUTDIR_ABS="$(cd "$CLUSTER_OUTDIR" && pwd)"
 NODE_DIR="$CLUSTER_OUTDIR_ABS/127.0.0.1"
 
-# RPC URL: read straight from the profile's own [config_ini_override] web3_rpc.listen_port
-# (apply_profile.sh patches this into every node's config.ini), falling back to the AIR
-# default of 8545. Reusing profile_lib.sh here is a documented assumption that the profile
-# already parsed successfully once by apply_profile.sh above — verified only against a live
-# chain, not by this task's own (dry-run-only) tests.
+# RPC URL: derive from node0's FINAL config.ini via _primary_web3_url, not from the profile's own
+# [config_ini_override] value — the profile only names the port apply_profile.sh would have
+# written BEFORE any host WEB3_BASE override, so reading it directly here silently probed the
+# wrong port whenever WEB3_BASE overrode the profile (Design Decision rev3 #2). Reusing
+# profile_lib.sh here is a documented assumption that the profile already parsed successfully once
+# by apply_profile.sh above — verified only against a live chain, not by this task's own
+# (dry-run-only) tests.
 source "$SCRIPT_DIR/profile_lib.sh"
 source "$SCRIPT_DIR/oracle_lib.sh"
 profile_load "$PROFILE_PATH"
-web3_port="${PROFILE_CONFIG[web3_rpc.listen_port]:-8545}"
-RPC_URL="http://127.0.0.1:${web3_port}"
+RPC_URL="$(_primary_web3_url "$NODE_DIR")" || {
+    echo "ERROR: gate: could not derive the primary Web3 RPC URL from $NODE_DIR/node0/config.ini" >&2
+    exit 1
+}
 
 # Task 13: local defect sink. failures_lib.sh is pure-local (no network — see its own header),
 # so sourcing it here does not add a cloud dependency to this real-run path; only

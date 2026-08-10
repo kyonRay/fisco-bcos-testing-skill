@@ -86,6 +86,50 @@ _discover_stateroot_urls() {
     printf '%s\n' "$out"
 }
 
+# _primary_web3_url <node_dir> — node0's Web3 RPC URL, read from its FINAL config.ini (i.e. after
+# apply_profile.sh's config.ini patch loop ran, so a host WEB3_BASE override is already reflected
+# there — see _apply_profile_web3_port in apply_profile.sh). Reuses the same exact-key [web3_rpc]
+# parse + host-normalization pattern as _discover_stateroot_urls above.
+#
+# gate.sh and run_case.sh both used to derive their liveness/height RPC_URL straight from the
+# PROFILE's own [config_ini_override] web3_rpc.listen_port value — which is only the port
+# apply_profile.sh would have written BEFORE any WEB3_BASE override, so a run with WEB3_BASE set
+# had every oracle probe the wrong port while the cluster itself was healthy on the right one.
+# Deriving RPC_URL from this function instead closes that gap (Design Decision rev3 #2).
+#
+# If $WEB3_RPC_URL is set (host-injected, e.g. by an outer orchestrator that already knows the
+# effective port), it is returned as-is but only after asserting it names the SAME port node0's
+# own config.ini says is authoritative — a mismatch is refused rather than silently probing
+# whichever of the two is wrong.
+#
+# rc: 0 on success; 3 when node0's config.ini is missing, its [web3_rpc] is not enabled, or no
+# listen_port key is found; 1 when WEB3_RPC_URL is set but disagrees with node0's config.ini.
+_primary_web3_url() {
+    local node_dir="$1" enabled host port url
+    local cfg="$node_dir/node0/config.ini"
+    [[ -f "$cfg" ]] || { echo "ERROR: _primary_web3_url: no config.ini at $cfg" >&2; return 3; }
+    enabled="$(awk -F= '/^[[:space:]]*\[/{s=($0 ~ /\[web3_rpc\]/)} s{k=$1;gsub(/[[:space:]]/,"",k); if(k=="enable"){v=$2;gsub(/[[:space:]]/,"",v);print v}}' "$cfg" | tail -n1)"
+    [[ "$enabled" == "true" ]] || { echo "ERROR: _primary_web3_url: node0's [web3_rpc] is not enabled in $cfg" >&2; return 3; }
+    host="$(awk -F= '/^[[:space:]]*\[/{s=($0 ~ /\[web3_rpc\]/)} s{k=$1;gsub(/[[:space:]]/,"",k); if(k=="listen_ip"){v=$2;gsub(/[[:space:]]/,"",v);print v}}' "$cfg" | tail -n1)"
+    port="$(awk -F= '/^[[:space:]]*\[/{s=($0 ~ /\[web3_rpc\]/)} s{k=$1;gsub(/[[:space:]]/,"",k); if(k=="listen_port"){v=$2;gsub(/[[:space:]]/,"",v);print v}}' "$cfg" | tail -n1)"
+    [[ -n "$port" ]] || { echo "ERROR: _primary_web3_url: no web3_rpc.listen_port found in $cfg" >&2; return 3; }
+    case "$host" in
+        ""|"0.0.0.0") host="127.0.0.1" ;;
+        "::"|"[::]")  host="[::1]" ;;   # unspecified IPv6 -> loopback
+        \[*\]) ;;                        # already bracketed
+        *:*) host="[$host]" ;;          # bare IPv6 literal -> bracket it
+    esac
+    url="http://$host:$port"
+    if [[ -n "${WEB3_RPC_URL:-}" ]]; then
+        if [[ "$WEB3_RPC_URL" != "$url" ]]; then
+            echo "ERROR: _primary_web3_url: host-injected WEB3_RPC_URL=$WEB3_RPC_URL does not match node0's authoritative config.ini ($url) — refusing to probe an inconsistent port" >&2
+            return 1
+        fi
+        url="$WEB3_RPC_URL"
+    fi
+    echo "$url"
+}
+
 # _run_stateroot_oracle <height> <node_dir> [extra_csv] — shared stateroot-oracle runner used by
 # every call site (gate.sh, run_case.sh, scenario_upgrade.sh, fuzz_bcos.sh): discover this
 # cluster's live Web3 RPC URLs via _discover_stateroot_urls, then feed ALL of them to

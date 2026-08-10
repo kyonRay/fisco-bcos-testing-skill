@@ -12,11 +12,19 @@
 #                invented or emitted.
 #     -h  print this help and exit
 #
+#   Host-provided env vars (not part of any .profile file):
+#     FISCO_BIN   specific fisco-bcos binary for cluster_up.sh -e (default: cluster_up.sh's own)
+#     WEB3_BASE   Web3 RPC base port for cluster_up.sh -w; OUTRANKS the profile's own captured
+#                 web3_rpc.listen_port in the later config.ini patch too (default: 8545)
+#
 # Real-run (no --dry-run; needs a live fisco-bcos binary — NOT exercised by this skill's own
 # tests, since there is no binary in this environment):
-#   1. cluster_up.sh (sibling fisco-bcos-testing skill) runs build_chain + start_all and waits
-#      for RPC to answer.
-#   2. Each node's config.ini is patched per [config_ini_override].
+#   1. cluster_up.sh (sibling fisco-bcos-testing skill) runs build_chain + start_all with this
+#      profile's compatibility_version + cluster topology (-v/-n/-p/-s, plus -e/-w from the env
+#      vars above), and waits for RPC to answer.
+#   2. Each node's config.ini is patched per [config_ini_override] (web3_rpc.listen_port keeps
+#      whatever WEB3_BASE-derived port step 1 already set; every other listen_port key gets the
+#      profile's own base+i renumbering).
 #   3. The cluster is restarted so the config.ini patch takes effect.
 #   4. Each [system_config_replay] pair is replayed via the Java console's setSystemConfigByKey.
 set -euo pipefail
@@ -56,19 +64,65 @@ done
 [[ -z "$PROFILE_PATH" ]] && { echo "ERROR: -p <profile> is required. -h for help." >&2; exit 2; }
 [[ -f "$PROFILE_PATH" ]] || { echo "ERROR: profile not found: $PROFILE_PATH" >&2; exit 1; }
 
+# _apply_profile_cluster_up_args <outdir> <version> <fisco_bin> <node_count> <ports> <web3_base>
+# <sm_mode> — fills global APPLY_CU_ARGS with the cluster_up.sh argv (Task 3's cluster_up.sh
+# -v/-w passthrough) needed to bring up this profile's topology. Empty fisco_bin/web3_base omit
+# -e/-w so cluster_up.sh falls back to its own defaults (repo-root binary / port 8545); sm_mode
+# "1" adds the bare -s flag.
+#
+# `return 0` is required, not decorative — the same trap Task 3's own
+# _cluster_up_build_chain_argv hit: if this function's LAST executed statement were the trailing
+# `[[ "$sm_mode" == "1" ]] && ...` and sm_mode were "0" (the common non-SM case), that conditional
+# evaluates false and the function itself returns 1 under set -euo pipefail — aborting the whole
+# script at its bare top-level call site below.
+_apply_profile_cluster_up_args() {
+    local outdir="$1" version="$2" fisco_bin="$3" node_count="$4" ports="$5" web3_base="$6" sm_mode="$7"
+    APPLY_CU_ARGS=(-o "$outdir" -v "$version" -n "$node_count" -p "$ports")
+    [[ -n "$fisco_bin" ]] && APPLY_CU_ARGS+=(-e "$fisco_bin")
+    [[ -n "$web3_base" ]] && APPLY_CU_ARGS+=(-w "$web3_base")
+    [[ "$sm_mode" == "1" ]] && APPLY_CU_ARGS+=(-s)
+    return 0
+}
+
+# _apply_profile_web3_port <profile_listen_port> <node_index> <web3_base_override> — the
+# web3_rpc.listen_port value to write into node<node_index>'s config.ini. A host-provided
+# web3_base_override (from $WEB3_BASE) OUTRANKS the profile's own captured port: without this, the
+# config.ini patch loop's later pass over [config_ini_override] would blindly rewrite the port
+# cluster_up.sh already brought the cluster up on (base+i, per WEB3_BASE) back to the profile's own
+# captured base+i — silently undoing the override. Empty override falls back to the profile's own
+# port.
+_apply_profile_web3_port() {
+    local profile_port="$1" node_idx="$2" override="$3" base="$1"
+    [[ -n "$override" ]] && base="$override"
+    echo $((base + node_idx))
+}
+
 source "$SCRIPT_DIR/profile_lib.sh"
 profile_load "$PROFILE_PATH"
 
 genesis_compat="${PROFILE_GENESIS[compatibility_version]:-}"
 [[ -z "$genesis_compat" ]] && { echo "ERROR: profile has no [genesis] compatibility_version" >&2; exit 1; }
 
+# Cluster topology for the cluster_up.sh call below (both dry-run and real-run paths share it, so
+# the dry-run plan text matches what a real run would actually do). node_count comes from the
+# profile's own [meta] node_count (e.g. rpbft-scale.profile's 7), default 4 — matching
+# cluster_up.sh's own default. sm_mode comes from the profile's [genesis] sm_crypto. FISCO_BIN and
+# WEB3_BASE are host-provided env vars (not part of any profile file): FISCO_BIN selects a specific
+# fisco-bcos binary, WEB3_BASE overrides the Web3 RPC base port cluster_up.sh brings the cluster up
+# on (and, via _apply_profile_web3_port below, the port the later config.ini patch loop keeps).
+node_count="${PROFILE_META[node_count]:-4}"
+sm_mode=0
+[[ "${PROFILE_GENESIS[sm_crypto]:-}" == "true" ]] && sm_mode=1
+cu_ports="30300,20200"
+_apply_profile_cluster_up_args "$OUTDIR" "$genesis_compat" "${FISCO_BIN:-}" "$node_count" "$cu_ports" "${WEB3_BASE:-}" "$sm_mode"
+
 if [[ "$DRY_RUN" == 1 ]]; then
     echo "== apply_profile dry-run =="
     echo "profile: $PROFILE_PATH"
     echo "outdir:  $OUTDIR"
     echo ""
-    echo "[1/3] build_chain:"
-    echo "  tools/BcosAirBuilder/build_chain.sh -v \"$genesis_compat\" -p 30300,20200 -l 127.0.0.1:4 -o \"$OUTDIR\"   # compatibility_version $genesis_compat"
+    echo "[1/3] cluster_up.sh (wraps build_chain.sh + start_all.sh):"
+    echo "  cluster_up.sh ${APPLY_CU_ARGS[*]}   # compatibility_version $genesis_compat"
     echo ""
     echo "[2/3] config.ini patch (from [config_ini_override]):"
     while read -r pair; do
@@ -96,19 +150,20 @@ fi
 # Real-run — needs live chain. Never reached from --dry-run.
 # ---------------------------------------------------------------------------
 
-CLUSTER_UP="$SCRIPT_DIR/../../fisco-bcos-testing/scripts/cluster_up.sh"
+# CLUSTER_UP is overridable via env for testing (a spy/recorder script stands in for the real
+# cluster_up.sh so a test can assert the real call's argv without a live chain).
+CLUSTER_UP="${CLUSTER_UP:-$SCRIPT_DIR/../../fisco-bcos-testing/scripts/cluster_up.sh}"
 [[ -f "$CLUSTER_UP" ]] || {
     echo "ERROR: sibling skill script not found: $CLUSTER_UP (expected the fisco-bcos-testing skill checked out alongside this one)" >&2
     exit 1
 }
 
 echo ">> [1/4] cluster_up (needs live chain): build_chain + start_all into $OUTDIR"
-# GAP: cluster_up.sh has no compatibility_version passthrough to build_chain -v, so the
-# genesis compat version in this profile ($genesis_compat) is NOT applied here — the local
-# chain starts at build_chain's own default until a later `console setSystemConfigByKey
-# compatibility_version $genesis_compat` bumps it. Wiring the passthrough is out of this
-# task's scope (it belongs to whichever task owns the sibling cluster_up.sh).
-bash "$CLUSTER_UP" -o "$OUTDIR"
+# Threads this profile's compatibility_version + cluster topology into cluster_up.sh (Task 3's
+# -v/-n/-p/-w/-s/-e), via the SAME APPLY_CU_ARGS array the dry-run plan above already printed —
+# the "GAP: no compatibility_version passthrough" limitation this comment used to describe here is
+# now closed.
+bash "$CLUSTER_UP" "${APPLY_CU_ARGS[@]}"
 NODE_DIR="$OUTDIR/127.0.0.1"
 
 echo ">> [2/4] patching config.ini per profile (needs live chain)"
@@ -129,7 +184,15 @@ while read -r pair; do
         node_value="$value"
         if [[ "$key" == *listen_port && "$value" =~ ^[0-9]+$ ]]; then
             node_idx="$(basename "$(dirname "$cfg")")"
-            node_value=$((value + ${node_idx#node}))
+            node_idx="${node_idx#node}"
+            if [[ "$section" == "web3_rpc" && "$key" == "listen_port" ]]; then
+                # WEB3_BASE (if the host set it) outranks the profile's own captured port here —
+                # cluster_up.sh above already brought this cluster up on WEB3_BASE+i (Task 3's -w),
+                # so blindly applying the profile's base+i would silently undo that override.
+                node_value="$(_apply_profile_web3_port "$value" "$node_idx" "${WEB3_BASE:-}")"
+            else
+                node_value=$((value + node_idx))
+            fi
         fi
         # Pass section/key/value via env instead of interpolating them into the perl source
         # text (a value containing '/', '$', '@', or a quote would otherwise corrupt the

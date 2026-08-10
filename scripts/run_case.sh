@@ -181,11 +181,16 @@ bash "$APPLY_PROFILE" -p "$CASE_PROFILE" -o "$CLUSTER_OUTDIR"
 CLUSTER_OUTDIR_ABS="$(cd "$CLUSTER_OUTDIR" && pwd)"
 NODE_DIR="$CLUSTER_OUTDIR_ABS/127.0.0.1"
 
-source "$SCRIPT_DIR/profile_lib.sh"
+# RPC URL: derive from node0's FINAL config.ini via _primary_web3_url — see gate.sh's own
+# comment on this (same Design Decision rev3 #2 fix: a raw PROFILE_CONFIG read misses a host
+# WEB3_BASE override applied by apply_profile.sh). run_case.sh has no other use for PROFILE_*
+# (unlike gate.sh, which still reads PROFILE_GENESIS[compatibility_version] for its own log
+# lines), so profile_lib.sh/profile_load are deliberately NOT sourced here.
 source "$SCRIPT_DIR/oracle_lib.sh"
-profile_load "$CASE_PROFILE"
-web3_port="${PROFILE_CONFIG[web3_rpc.listen_port]:-8545}"
-RPC_URL="http://127.0.0.1:${web3_port}"
+RPC_URL="$(_primary_web3_url "$NODE_DIR")" || {
+    echo "ERROR: run_case: could not derive the primary Web3 RPC URL from $NODE_DIR/node0/config.ini" >&2
+    exit 1
+}
 
 # PID discovery mirrors gate.sh's own (see scripts/gate.sh's discovery block for the documented
 # assumption about cluster_up.sh's process-launch layout this relies on).
