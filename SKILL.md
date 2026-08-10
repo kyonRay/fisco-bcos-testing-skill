@@ -152,16 +152,20 @@ reports PASS having exercised no load has not tested anything. The scenario wire
 itself (SSL off, single peer, signing account pinned to the genesis auth_admin that
 `apply_profile.sh` funds) — do not hand-edit its `conf/config.toml` first.
 
-**`upgrade` is opt-in — the default sweep SKIPs it, on purpose.** `scenario_upgrade_run`'s real
-signature is `scenario_upgrade_run <outdir> <old_bin> <new_bin> <target_ver>`, but `gate.sh`'s
-real-run dispatch loop calls every registered scenario function bare (no arguments) — it cannot
-supply those four. So `gate.sh`'s bare-dispatch loop SKIPs `upgrade` (not run, not failed; see
-`GATE_SCENARIOS_NEEDS_ARGS` in `gate.sh`) even when it's in the requested scenario list, which it
-is by default. This means the canonical headline command, `gate.sh -p <profile>` with no
-`--scenarios` flag, runs `ut` / `dual_rpc` / `malformed` for real and reaches `GATE: PASS` on a
-healthy chain — `upgrade` no longer silently fails that run. `upgrade` stays a valid
-`GATE_KNOWN_SCENARIOS` entry (so `--scenarios upgrade --dry-run` still validates it, and
-`--dry-run` on the default set prints a `needs-args:` line naming it) — to actually drive it,
+**`upgrade` is not a gate-sweep scenario — selecting it is a usage error, on purpose.**
+`scenario_upgrade_run`'s real signature is `scenario_upgrade_run <outdir> <old_bin> <new_bin>
+<target_ver>`, but `gate.sh`'s real-run dispatch loop calls every registered scenario function bare
+(no arguments) — it cannot supply those four. So `GATE_KNOWN_SCENARIOS` is exactly the four
+runnable families (`ut dual_rpc malformed jsd`); `upgrade` is deliberately excluded from it, even
+though `scenario_upgrade.sh` still self-registers into `GATE_SCENARIOS` for callers that source it
+directly. `_gate_validate_scenarios` checks every requested name and rejects a bare `upgrade`
+selection with exit 2 (config error) before any chain is touched — `--scenarios upgrade`, with or
+without `--dry-run`, fails immediately with a message pointing at the dedicated entry point:
+`fbt gate upgrade -p <profile> --old-bin <p> --new-bin <p> --target-ver <v>`. An unknown scenario
+name also returns 2; a known-but-unregistered name (a `scenario_<name>.sh` that failed to source)
+returns 3. This means the canonical headline command, `gate.sh -p <profile>` with no `--scenarios`
+flag, runs `ut` / `dual_rpc` / `malformed` / `jsd` for real and reaches `GATE: PASS` on a healthy
+chain — `upgrade` never appears in that default sweep. To actually drive the upgrade timeline,
 source `scripts/scenarios/scenario_upgrade.sh` directly and call `scenario_upgrade_run` yourself
 with the cluster outdir, the old (current production) binary, the new (release-candidate) binary,
 and the target `compatibility_version` string.

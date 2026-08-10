@@ -71,28 +71,30 @@ doesn't).
 
 `oracle_stateroot.sh -b <height> -r <url> [-r <url> ...]` needs at least one `-r`; with only one
 URL it prints `OK: only one node sampled, nothing to compare` and exits 0 — a same-node
-"comparison" is not a comparison. `gate.sh`'s own call passes exactly one `-r "$RPC_URL"`
-(the whole-cluster Web3 RPC endpoint patched from the profile, not a per-node port), so in
-practice `gate.sh`'s baseline/after-scenario stateroot check is this single-URL no-op path;
-`scenario_upgrade.sh`'s T2-T4 per-node fork check (`_upg_no_fork`, sampling 3 nodes' individual
-BCOS RPC ports) is where a real multi-node comparison happens today — it reimplements the same
-same-height-different-hash logic independently rather than sourcing `oracle_stateroot_decide`.
+"comparison" is not a comparison. That single-node no-op path is no longer what `gate.sh` hits in
+practice: `run_oracles_once` now derives the stateroot check via `_run_stateroot_oracle` in
+`oracle_lib.sh`, which first calls `_discover_stateroot_urls <node_dir>` to enumerate **every**
+node under `<outdir>/127.0.0.1/node*/config.ini` whose `[web3_rpc]` is `enable=true` (deduped,
+sorted, host-normalized), then feeds all of them to `oracle_stateroot.sh` as repeated `-r` flags —
+so a real cross-node stateRoot comparison runs on the baseline pass and after every scenario, not
+just during `scenario_upgrade.sh`'s T2-T4 timeline. `_discover_stateroot_urls` returns 3 (on
+stderr) when fewer than 2 URLs are found; `gate.sh` treats that as a hard error for that oracle
+pass (`rc=1`), not a silent single-node pass. `_run_stateroot_oracle` is the one shared runner
+used by every call site — `gate.sh`, `run_case.sh`, `scenario_upgrade.sh`, and `fuzz_bcos.sh` all
+go through it, so this fix applies uniformly rather than only to `gate.sh`.
 
 **`oracle_fork_decide`** (same-height/different-hash, in `oracle_lib.sh`) is defined and directly
 unit-tested (`tests/oracle_test.sh`) but is not currently called by any live wrapper script or
 scenario — `_upg_no_fork` in `scripts/scenarios/scenario_upgrade.sh` duplicates its logic rather
-than sourcing it. Treat it as a tested building block available for a future multi-node stateroot
-wrapper, not as wired-in today.
+than sourcing it. `scenario_upgrade.sh`'s T2-T4 per-node fork check (sampling 3 nodes' individual
+BCOS RPC ports after each binary swap) remains a separate, additional multi-node check specific to
+the rolling-upgrade timeline, not a substitute for the gate-wide stateroot oracle above.
 
-**GAP, stated plainly**: through `gate.sh`'s default sweep, 2 of the 3 oracles (crash,
-consensus-halt) get a real chance to fire; state-mismatch does not, because a real cross-node
-comparison needs per-node RPC discovery that `gate.sh`'s single `-r "$RPC_URL"` call doesn't do
-(see above — `oracle_stateroot_decide` needs ≥2 URLs to compare anything, and `gate.sh` only ever
-passes one). Today the only place a real state-mismatch check runs is `scenario_upgrade.sh`'s
-T2-T4 `_upg_no_fork` check (3 nodes' individual BCOS RPC ports, sampled after each binary swap) —
-and since `gate.sh`'s bare-dispatch loop SKIPs `upgrade` by default (see `GATE_SCENARIOS_NEEDS_ARGS`
-in `gate.sh`), even that only runs when `scenario_upgrade_run` is invoked directly, not as part of
-a bare `gate.sh -p <profile>` sweep.
+**Previously a documented GAP, now fixed**: `gate.sh`'s default sweep used to pass only one `-r`
+URL to the stateroot oracle (the whole-cluster `RPC_URL`), so state-mismatch never got a real
+chance to fire outside `scenario_upgrade.sh`. With `_discover_stateroot_urls`/
+`_run_stateroot_oracle` in place, all three oracles now get a real chance to fire on every
+`gate.sh -p <profile>` round, independent of whether `scenario_upgrade.sh` is invoked at all.
 
 ## Explicitly not an oracle: grepping logs for `ERROR`
 

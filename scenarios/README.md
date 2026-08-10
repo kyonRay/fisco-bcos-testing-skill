@@ -3,7 +3,7 @@
 This directory holds declarative `.case` files, each a single confirmed-or-tracked failure
 replayed deterministically by `scripts/run_case.sh`. It is **not**
 `scripts/scenarios/`, which holds the four `scenario_*.sh` gate scenario *families*
-(`ut`, `dual_rpc`, `malformed`, `upgrade` — see `scripts/gate.sh`'s `GATE_KNOWN_SCENARIOS`) that
+(`ut`, `dual_rpc`, `malformed`, `jsd` — see `scripts/gate.sh`'s `GATE_KNOWN_SCENARIOS`) that
 `gate.sh` runs every round. The two directories serve different layers:
 
 - `scripts/scenarios/*.sh` — general-purpose scenario families, broad by design, exercised on
@@ -18,18 +18,40 @@ rounds later.
 
 ## The `.case` format
 
-INI-like, one `[case]` section, three required keys:
+INI-like, one `[case]` section, three required keys (`profile`/`input`/`expect_oracle`) plus a
+`status` field documenting the fixture's place in the flywheel:
 
 ```
 [case]
-profile = profiles/default-latest.profile
+status = active
+profile = default-latest
 input = console.sh call HelloWorld get
 expect_oracle = pass
 ```
 
-- `profile` — path (relative to the repo root) to a `.profile` file under `profiles/`. This is
-  the exact production config the failure was captured under; `run_case.sh` hands it straight to
-  `apply_profile.sh` to reproduce that chain locally.
+- `status` — one of `active`, `pending`, or `example` (see "The flywheel" below for how a fixture
+  moves through these):
+  - `active` — a confirmed fix. Meant to be swept by the gate every round once a `.case` sweep is
+    wired into `gate.sh` itself (not yet done — see "The flywheel" below); today it is replayed
+    on demand via `run_case.sh` and is expected to PASS.
+  - `pending` — found but not yet fixed. `fuzz_bcos.sh`'s `_fuzz_write_case` auto-distills these
+    from a confirmed, bisected oracle trip before the underlying defect is fixed (e.g.
+    `fuzz_seed43_idx11.case`); the still-open defect itself lives in `failures.jsonl`. A `pending`
+    case is reported, not swept — replaying it via `run_case.sh` is *expected* to FAIL (or
+    reproduce the trip outright) until the fix lands, at which point it is re-marked `active`.
+  - `example` — a format demonstration, not a captured incident (`example.case` below). Never
+    swept; run only by hand.
+  `run_case.sh`'s own `[case]` parser does not currently read `status` — like any other
+  unrecognized key (see the note on typos below), it is accepted and silently ignored. The field
+  is a documented convention for humans and for the future gate sweep to key off of, not (yet)
+  something `run_case.sh` itself branches on.
+- `profile` — the `.profile` to reproduce, resolved by `run_case.sh`'s
+  `_run_case_resolve_profile` in one of three forms, checked in order: an absolute path (used
+  as-is); a path containing `/` (resolved relative to the `.case` file's own directory); or — the
+  normal, and now the convention shown above — a bare **logical profile name** with no `/` at all
+  (e.g. `default-latest`), resolved to `${FBT_PROFILE_DIR:-<repo>/profiles}/<name>.profile`. This
+  is the exact production config the failure was captured under; `run_case.sh` hands the resolved
+  path straight to `apply_profile.sh` to reproduce that chain locally.
 - `input` — the command the exploration layer used to trigger the failure: a console
   invocation, a curl against the Web3 RPC, a crafted transaction submission, or similar. Applied
   verbatim via `bash -c`, with its exit status captured (never allowed to abort `run_case.sh`
@@ -79,19 +101,23 @@ ever comes back, the case starts reporting `CASE: FAIL` on its own.
    mismatch — is confirmed fixed: the input now applies cleanly (`pass`), or a malformed/malicious
    input is confirmed to be safely refused without taking the node down (`reject`).
 2. **Distill into a `.case`.** The confirmed profile + input + expected outcome become a `.case`
-   file: `profile=` the exact `.profile` used, `input=` the exact reproducing command,
-   `expect_oracle=pass` or `reject` per which of the two the confirmed fix landed as.
+   file: `status=active`, `profile=` the exact (logical) `.profile` name used, `input=` the exact
+   reproducing command, `expect_oracle=pass` or `reject` per which of the two the confirmed fix
+   landed as. A trip that is bisected but not yet fixed instead gets auto-distilled with
+   `status=pending` (see `fuzz_bcos.sh`'s `_fuzz_write_case`) — it records the target post-fix
+   behavior up front, and is re-marked `active` once the fix actually lands.
 3. **Drop it in `scenarios/`.** The file lives here permanently — it is the durable record of a
-   once-broken input now behaving correctly.
-4. **The gate re-runs it every round.** Every fixture accumulated here is meant to be swept by
-   future gate rounds (today: run each with `run_case.sh` directly; wiring a `.case` sweep into
-   `gate.sh` itself is a natural next step, not yet done), so a regression that was fixed once
-   cannot silently come back — it resurfaces as a failing case instead of being re-discovered
-   from scratch.
+   once-broken (or still-broken-but-tracked) input.
+4. **The gate re-runs it every round.** Every `active` fixture accumulated here is meant to be
+   swept by future gate rounds (today: run each with `run_case.sh` directly; wiring a `.case`
+   sweep into `gate.sh` itself is a natural next step, not yet done, and `status` is what that
+   sweep will filter on — `active` runs and must pass, `pending` is reported but not swept,
+   `example` is never swept), so a regression that was fixed once cannot silently come back — it
+   resurfaces as a failing case instead of being re-discovered from scratch.
 
 ## `example.case`
 
 `scenarios/example.case` is a fixture demonstrating the format, not a captured production
-incident — it targets the `default-latest` archetype profile (no real chain data) with a
-read-only console call and `expect_oracle=pass`, the common case: confirm a benign input against
-a reproduced profile trips nothing.
+incident — `status = example` marks it as such. It targets the `default-latest` archetype profile
+(no real chain data) with a read-only console call and `expect_oracle=pass`, the common case:
+confirm a benign input against a reproduced profile trips nothing.
