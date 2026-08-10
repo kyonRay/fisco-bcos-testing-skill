@@ -237,6 +237,49 @@ assert_eq "1" "$abort_probe_calls" "bisect stops immediately on ABORT — does n
 rm -f "$_abort_probe_callfile"
 
 # ---------------------------------------------------------------------------
+# _fuzz_oracle_check_once REAL stateroot rc=3 -> exit 1 termination (review fix, sub0 task 2).
+# Every other test in this file that touches _fuzz_oracle_check_once stubs the WHOLE function
+# (Case A/B below, e.g.) — none of them exercise its real body, so the single most safety-critical
+# behavior this task added (an infrastructure failure terminating the entire fuzz run immediately,
+# rather than being folded into the ordinary trip/bisect machinery) had zero coverage. This drives
+# the REAL function: a genuine single-node NODE_DIR makes _discover_stateroot_urls (and therefore
+# _run_stateroot_oracle) really return rc=3, and the assertion is that the subshell running
+# _fuzz_oracle_check_once exits 1 — i.e. the function's own `exit 1` fired, not a return value a
+# caller could catch and reinterpret. MUST run before the Case A/B section below, which redefines
+# _fuzz_oracle_check_once as a mock for the rest of the file.
+# ---------------------------------------------------------------------------
+_rc3_tmpdir="$(mktemp -d)"
+mkdir -p "$_rc3_tmpdir/node0"
+printf '[web3_rpc]\n enable=true\n listen_port=8545\n' > "$_rc3_tmpdir/node0/config.ini"
+# Only one node dir under $_rc3_tmpdir -> _discover_stateroot_urls finds exactly 1 URL, which is
+# <2, so it (and _run_stateroot_oracle wrapping it) returns rc=3 for real — no STATEROOT_ORACLE
+# stub needed, since rc=3 short-circuits before oracle_stateroot.sh is ever invoked (same
+# short-circuit tests/run_stateroot_oracle_test.sh's own "single node -> infra 3" case proves).
+NODE_DIR="$_rc3_tmpdir"
+
+# Stub ONLY the crash/liveness legs' scripts (via a fake SCRIPT_DIR), not _fuzz_oracle_check_once
+# itself: both must report clean so the subshell's exit status can ONLY come from the stateroot
+# leg's real `exit 1` — otherwise the liveness leg alone tripping (no live chain to poll) would
+# make the subshell exit 1 anyway and the assertion below would pass even with `exit 1` neutered,
+# which is exactly the false-confidence gap this test exists to close.
+_rc3_scriptdir="$(mktemp -d)"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$_rc3_scriptdir/oracle_crash.sh"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$_rc3_scriptdir/oracle_liveness.sh"
+chmod +x "$_rc3_scriptdir/oracle_crash.sh" "$_rc3_scriptdir/oracle_liveness.sh"
+_rc3_orig_script_dir="$SCRIPT_DIR"
+SCRIPT_DIR="$_rc3_scriptdir"
+NODE_PIDS=()                            # crash leg's stub ignores its args entirely; just needs to be a declared array
+_fuzz_rpc_height() { echo 5; }          # stub ONLY the height reader (still real IO otherwise) so the
+                                         # function reaches the stateroot leg without a live chain to ask for a height
+rc3_subshell_rc=0
+( _fuzz_oracle_check_once "batch0" >/dev/null 2>&1 ) || rc3_subshell_rc=$?
+assert_eq "1" "$rc3_subshell_rc" \
+    "_fuzz_oracle_check_once: REAL stateroot rc=3 (<2 node RPCs discovered) terminates the run via exit 1, not a caught return value"
+unset -f _fuzz_rpc_height
+SCRIPT_DIR="$_rc3_orig_script_dir"
+rm -rf "$_rc3_tmpdir" "$_rc3_scriptdir"
+
+# ---------------------------------------------------------------------------
 # _fuzz_reinject_range_and_check probe-POLARITY regression (the live-bisection bug this skill
 # actually shipped: this real probe used to end with a bare `_fuzz_oracle_check_once ...` call and
 # let ITS exit code fall through — 0 = all oracles clean. But _fuzz_bisect (and every mock probe
