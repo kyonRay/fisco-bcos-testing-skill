@@ -503,19 +503,25 @@ scenario_upgrade_run() {
         return 1
     fi
 
-    # RPC_URL: same convention gate.sh's own real-run uses — read straight from the profile's own
-    # [config_ini_override] web3_rpc.listen_port (apply_profile.sh patches this into every node's
-    # config.ini), falling back to the AIR default of 8545. This is the whole-cluster gate-oracle
-    # endpoint used by T1/T7 below; it is distinct from the per-node BCOS RPC ports (_upg_rpc_url_for)
-    # the T2-T4 no-fork check samples individually.
+    # RPC_URL: derive from node0's FINAL config.ini via _primary_web3_url, not from the profile's
+    # own [config_ini_override] value — see gate.sh's/run_case.sh's own comment on this (Design
+    # Decision rev3 #2 fix: a raw PROFILE_CONFIG read misses a host WEB3_BASE override applied by
+    # apply_profile.sh). This is the whole-cluster gate-oracle endpoint used by T1/T7 below; it is
+    # distinct from the per-node BCOS RPC ports (_upg_rpc_url_for) the T2-T4 no-fork check samples
+    # individually.
     source "$SCENARIO_UPG_DIR/../profile_lib.sh"
     # Sourced here, not at file scope — same convention scenario_dual_rpc.sh's own
     # SCENARIO_DRPC_ORACLE_LIB source uses (see its comment): only reached on a real run, never by
     # SCENARIO_DRY=1 or by merely sourcing this file.
     source "$SCENARIO_UPG_DIR/../oracle_lib.sh"
+    # profile_load is still needed here: PROFILE_GENESIS[compatibility_version] is read later
+    # (see the comment at that use site) and this is the only profile_load call in this function.
     profile_load "$profile_path"
-    local web3_port="${PROFILE_CONFIG[web3_rpc.listen_port]:-8545}"
-    local rpc_url="http://127.0.0.1:${web3_port}"
+    local rpc_url
+    rpc_url="$(_primary_web3_url "$node_dir_root")" || {
+        echo "ERROR: scenario_upgrade: could not derive the primary Web3 RPC URL from $node_dir_root/node0/config.ini" >&2
+        return 1
+    }
 
     local -a pids=()
     mapfile -t pids < <(_upg_discover_pids)
