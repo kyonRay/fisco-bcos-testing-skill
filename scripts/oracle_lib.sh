@@ -50,3 +50,36 @@ oracle_stateroot_decide() {
     done
     return 0
 }
+
+# _discover_stateroot_urls <node_dir> [extra_csv] — one URL per line (deduped,
+# sorted) for each node under <node_dir>/node*/config.ini whose [web3_rpc]
+# enable=true; appends any URLs from extra_csv (comma-separated). Normalizes
+# 0.0.0.0 -> 127.0.0.1, brackets any IPv6 literal (:: -> [::1], bare IPv6 ->
+# [addr]). Returns 3 on stderr when fewer than 2 URLs are found.
+_discover_stateroot_urls() {
+    local node_dir="$1" extra_csv="${2:-}" cfg enabled host port
+    local -a urls=()
+    # exact-key reader within [web3_rpc]: trim spaces around key, match key == want
+    for cfg in "$node_dir"/node*/config.ini; do
+        [[ -f "$cfg" ]] || continue
+        enabled="$(awk -F= '/^[[:space:]]*\[/{s=($0 ~ /\[web3_rpc\]/)} s{k=$1;gsub(/[[:space:]]/,"",k); if(k=="enable"){v=$2;gsub(/[[:space:]]/,"",v);print v}}' "$cfg" | tail -n1)"
+        [[ "$enabled" == "true" ]] || continue
+        host="$(awk -F= '/^[[:space:]]*\[/{s=($0 ~ /\[web3_rpc\]/)} s{k=$1;gsub(/[[:space:]]/,"",k); if(k=="listen_ip"){v=$2;gsub(/[[:space:]]/,"",v);print v}}' "$cfg" | tail -n1)"
+        port="$(awk -F= '/^[[:space:]]*\[/{s=($0 ~ /\[web3_rpc\]/)} s{k=$1;gsub(/[[:space:]]/,"",k); if(k=="listen_port"){v=$2;gsub(/[[:space:]]/,"",v);print v}}' "$cfg" | tail -n1)"
+        [[ -n "$port" ]] || continue
+        case "$host" in
+            ""|"0.0.0.0") host="127.0.0.1" ;;
+            "::"|"[::]")  host="[::1]" ;;   # unspecified IPv6 -> loopback
+            \[*\]) ;;                        # already bracketed
+            *:*) host="[$host]" ;;          # bare IPv6 literal -> bracket it
+        esac
+        urls+=("http://$host:$port")
+    done
+    if [[ -n "$extra_csv" ]]; then local u; local -a e=(); IFS=',' read -r -a e <<< "$extra_csv"
+        for u in "${e[@]}"; do [[ -n "$u" ]] && urls+=("$u"); done; fi
+    local out n
+    out="$(printf '%s\n' "${urls[@]:-}" | awk 'NF' | sort -u)"
+    n="$(printf '%s\n' "$out" | awk 'NF' | wc -l | tr -d ' ')"
+    [[ "${n:-0}" -ge 2 ]] || { echo "ERROR: _discover_stateroot_urls: found ${n:-0} URL(s) under $node_dir, need >=2" >&2; return 3; }
+    printf '%s\n' "$out"
+}
