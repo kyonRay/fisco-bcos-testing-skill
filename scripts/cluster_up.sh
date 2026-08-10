@@ -143,7 +143,7 @@ bash "$START"
 NODE_ROOT="$(cd "$OUTDIR/127.0.0.1" && pwd)"
 started=0
 for i in $(seq 1 15); do
-  started="$(pgrep -f "$NODE_ROOT/node" 2>/dev/null | wc -l | tr -d ' ')"
+  started="$(pgrep -f "$NODE_ROOT/node" 2>/dev/null | wc -l | tr -d ' ')" || started=0
   [ "$started" -ge "$NODES" ] && break
   sleep 1
 done
