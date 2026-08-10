@@ -9,14 +9,27 @@
 #     -p  path to a .profile file (required)          e.g. profiles/production-enterprise.profile
 #     --scenarios  comma-separated scenario names       (default: all of GATE_KNOWN_SCENARIOS)
 #     --dry-run  print the profile name and the resolved scenario list, validate scenario
-#                names against GATE_KNOWN_SCENARIOS, and exit — no chain, no oracles, no
-#                scenario execution. An unrecognized scenario name is an error (exit 1).
+#                names via _gate_validate_scenarios, and exit — no chain, no oracles, no
+#                scenario execution.
 #     -h  print this help and exit
 #
-# Scenario names are validated declaratively against GATE_KNOWN_SCENARIOS, independent of
-# whether the corresponding scenario function has actually been implemented yet (Tasks 7-10
-# add scripts/scenarios/scenario_<name>.sh one at a time; each registers into the
-# GATE_SCENARIOS[name]=function associative array by being conditionally sourced below).
+# Scenario selection is checked by _gate_validate_scenarios (see its own comment below) before
+# anything else runs — gate.sh exits with whatever code the validator returns, so a bad selection
+# aborts with a distinct, classified exit code instead of silently doing nothing or failing mid-run:
+#   - 'upgrade' selected          -> 2 (config error; upgrade is not a gate.sh scenario — it needs
+#                                       <old_bin> <new_bin> <target_ver> this bare-dispatch loop
+#                                       can't supply; run it directly, see SKILL.md /
+#                                       references/upgrade-path.md)
+#   - unknown scenario name       -> 2 (config error)
+#   - known name, not registered  -> 3 (engine/setup fault — its scripts/scenarios/scenario_
+#                                       <name>.sh didn't source; should not happen for the four
+#                                       default families, all of which self-register above)
+#   - every requested name valid  -> 0, run proceeds
+#
+# GATE_KNOWN_SCENARIOS is exactly the four runnable families (ut, dual_rpc, malformed, jsd).
+# scenario_upgrade.sh still self-registers into GATE_SCENARIOS (for callers that source it and
+# call scenario_upgrade_run directly), but 'upgrade' is deliberately NOT a GATE_KNOWN_SCENARIOS
+# member — see _gate_validate_scenarios.
 #
 # Real-run (no --dry-run; needs a live fisco-bcos binary — NOT exercised by this skill's own
 # tests, since there is no binary in this environment):
@@ -27,14 +40,9 @@
 #   2. The three oracles run as ONE-SHOT checks (never a persistent background process) — once
 #      as a baseline right after bring-up, and once again after each scenario. Each call runs to
 #      completion and its real exit status is aggregated into oracle_tripped.
-#   3. Each requested scenario name is looked up in GATE_SCENARIOS and run in turn; a name
-#      with no registered function (i.e. its Task 7-10 scenario file hasn't been added yet,
-#      or simply wasn't sourced) is reported as a skip, not a crash. 'upgrade' is ALSO skipped
-#      here (not run, not failed) even once registered: its scenario_upgrade_run needs
-#      <outdir> <old_bin> <new_bin> <target_ver>, which this bare-dispatch loop cannot supply —
-#      run it directly (source scripts/scenarios/scenario_upgrade.sh; call scenario_upgrade_run
-#      yourself, see SKILL.md / references/upgrade-path.md). This keeps the DEFAULT scenario
-#      sweep (GATE_KNOWN_SCENARIOS = all four names) able to reach GATE: PASS on a healthy chain.
+#   3. Each requested scenario name is looked up in GATE_SCENARIOS and run in turn — validation
+#      above already guaranteed every requested name is known and registered, so there is no
+#      runtime SKIP branch here.
 #   4. The cluster is torn down.
 #   5. Exit code aggregates: any oracle trip OR any scenario failure -> non-zero.
 set -euo pipefail
@@ -48,23 +56,11 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Declarative list of valid scenario names, used by --dry-run validation. This does NOT depend
-# on scripts/scenarios/*.sh having been written yet — Tasks 7-10 add those files one at a time,
-# and this list already knows all four names up front.
-GATE_KNOWN_SCENARIOS="ut dual_rpc malformed jsd upgrade"
-
-# GATE_SCENARIOS_NEEDS_ARGS: scenario names whose registered function cannot be dispatched bare
-# ("$fn" with zero arguments) the way every other scenario is — today only 'upgrade'
-# (scenario_upgrade_run <outdir> <old_bin> <new_bin> <target_ver>; see scripts/scenarios/
-# scenario_upgrade.sh's own header and references/upgrade-path.md). A name in this set is a valid
-# GATE_KNOWN_SCENARIOS entry (validated by --dry-run, reachable via a direct scenario_upgrade_run
-# call — see SKILL.md) but is SKIPped, not run, by the real-run bare-dispatch loop below, and is
-# flagged in --dry-run output too so this is visible without a live chain. Declared up front (pure
-# data, no live-chain dependency) so both --dry-run and the real-run loop read the same set.
-# Without this, the default (`--scenarios` omitted) sweep — the documented canonical
-# `gate.sh -p <profile>` command — always included 'upgrade', which failed its missing-arg check
-# every time and turned GATE: PASS into GATE: FAIL even on a healthy chain.
-declare -A GATE_SCENARIOS_NEEDS_ARGS=([upgrade]=1)
+# Declarative list of valid scenario names, used by scenario-selection validation. Exactly the
+# four runnable families — 'upgrade' is excluded on purpose (see _gate_validate_scenarios below):
+# it needs <old_bin> <new_bin> <target_ver>, which this bare-dispatch loop cannot supply, so
+# selecting it is a config error rather than something the default sweep silently skips.
+GATE_KNOWN_SCENARIOS="ut dual_rpc malformed jsd"
 
 # name -> function map, filled by conditionally sourcing scripts/scenarios/*.sh below. Empty
 # (and that's fine) until Tasks 7-10 add scenario files.
@@ -129,24 +125,36 @@ else
     read -r -a scenario_list <<< "$GATE_KNOWN_SCENARIOS"
 fi
 
-# Validate every requested name against the declarative known-scenario list before doing
-# anything else — this check does not depend on GATE_SCENARIOS having a registered function
-# for the name, only on the name being a recognized one.
-for name in "${scenario_list[@]}"; do
-    if [[ ! " $GATE_KNOWN_SCENARIOS " == *" $name "* ]]; then
-        echo "ERROR: unknown scenario '$name' — known scenarios: $GATE_KNOWN_SCENARIOS" >&2
-        exit 1
-    fi
-done
+# _gate_validate_scenarios <known_csv> <registered_csv> <name...> — classify a bad scenario
+# selection into a DISTINCT exit code per class (Design Decision rev3 #5), so callers (and
+# sub-project 1's exit-code map) can tell them apart instead of collapsing everything into one
+# generic failure:
+#   2  'upgrade' selected, or an unknown name          -> config error (bad input from the caller)
+#   3  known name with no registered GATE_SCENARIOS fn -> engine/setup fault (a scenario that
+#                                                          SHOULD run but can't — its scenario file
+#                                                          didn't source)
+#   0  every requested name is known and registered
+_gate_validate_scenarios() {
+    local known="$1" registered="$2"; shift 2; local n
+    for n in "$@"; do
+        [[ "$n" == "upgrade" ]] && { echo "ERROR: 'upgrade' is not a gate scenario; run: fbt gate upgrade -p <profile> --old-bin <p> --new-bin <p> --target-ver <v>" >&2; return 2; }
+        [[ " $known " == *" $n "* ]]      || { echo "ERROR: unknown scenario '$n'" >&2; return 2; }
+        [[ " $registered " == *" $n "* ]] || { echo "ERROR: scenario '$n' selected but not registered" >&2; return 3; }
+    done
+    return 0
+}
+
+# Validate every requested name before doing anything else — the registered set is the keys of
+# GATE_SCENARIOS (populated by the conditional-source loop above), so this also catches a known
+# name whose scripts/scenarios/scenario_<name>.sh didn't source. gate.sh exits with whatever code
+# the validator returns; a non-zero rc aborts here, before --dry-run or any chain is touched.
+_gate_validate_scenarios "$GATE_KNOWN_SCENARIOS" "${!GATE_SCENARIOS[*]}" "${scenario_list[@]}"
 
 if [[ "$DRY_RUN" == 1 ]]; then
     echo "== gate dry-run =="
     echo "profile: $profile_name"
     for name in "${scenario_list[@]}"; do
         echo "scenario: $name"
-        if [[ -n "${GATE_SCENARIOS_NEEDS_ARGS[$name]:-}" ]]; then
-            echo "  needs-args: $name is SKIPped by the default bare-dispatch loop (requires old/new binaries + target version) — run it directly, see SKILL.md"
-        fi
     done
     echo "stateroot: runtime multi-node discovery under <outdir>/127.0.0.1 (_discover_stateroot_urls), fed to _run_stateroot_oracle"
     exit 0
@@ -278,18 +286,10 @@ run_oracles_once "baseline" || oracle_tripped=1
 echo ">> [3/4] running scenarios: ${scenario_list[*]}"
 scenario_failed=0
 
-# GATE_SCENARIOS_NEEDS_ARGS is declared up front, alongside GATE_KNOWN_SCENARIOS — see that
-# declaration's comment for what this set means and why it exists.
+# _gate_validate_scenarios above already guaranteed every name in scenario_list is both known
+# and registered, so there is no unregistered-name SKIP branch here.
 for name in "${scenario_list[@]}"; do
-    fn="${GATE_SCENARIOS[$name]:-}"
-    if [[ -z "$fn" ]]; then
-        echo "SKIP: scenario '$name' has no registered function (not implemented yet)"
-        continue
-    fi
-    if [[ -n "${GATE_SCENARIOS_NEEDS_ARGS[$name]:-}" ]]; then
-        echo "SKIP: $name requires old/new binaries + target version — run it directly, see SKILL.md (source scripts/scenarios/scenario_$name.sh; ${fn} <outdir> <old_bin> <new_bin> <target_ver>)"
-        continue
-    fi
+    fn="${GATE_SCENARIOS[$name]}"
     echo "-- running scenario: $name"
     if "$fn"; then
         echo "-- scenario '$name' PASSED"
