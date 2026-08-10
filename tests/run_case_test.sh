@@ -4,7 +4,9 @@ cd "$(dirname "$0")/.."
 source tests/assert.sh
 
 out="$(bash scripts/run_case.sh --dry-run scenarios/example.case)"
-assert_contains "$out" "profile: profiles/default-latest.profile" "dry-run echoes profile"
+# dry-run echoes the LOGICAL profile name verbatim (stable) — resolution to an absolute path via
+# _run_case_resolve_profile only happens in the real-run path, never here.
+assert_contains "$out" "profile: default-latest" "dry-run echoes profile"
 assert_contains "$out" "input: console.sh call HelloWorld get" "dry-run echoes input"
 assert_contains "$out" "expect_oracle: pass" "dry-run echoes expect_oracle"
 

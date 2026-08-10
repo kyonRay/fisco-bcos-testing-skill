@@ -100,9 +100,25 @@
 #                             loop against a cluster it cannot confirm is healthy). Also run once
 #                             more (best-effort) after the run stops on a confirmed trip, so the
 #                             box isn't left with a dead chain — see _fuzz_run's end-of-run step.
-#   RG_FUZZ_PROFILE       profile path recorded into a distilled scenarios/*.case's `profile =`
-#                         field (default profiles/production-enterprise.profile — override to
-#                         whatever profile the live chain you attached to actually is)
+#   RG_FUZZ_PROFILE_NAME  the LOGICAL profile name (e.g. "production-enterprise", NEVER a
+#                         profiles/... path) recorded into a distilled case's `profile =` field —
+#                         see run_case.sh's _run_case_resolve_profile, the counterpart that
+#                         resolves a bare logical name back into an absolute .profile path at
+#                         replay time. Set this explicitly to whatever profile the live chain you
+#                         attached to actually is. No hardcoded default — see RG_FUZZ_PROFILE
+#                         below and _fuzz_resolve_profile_name.
+#   RG_FUZZ_PROFILE       optional fallback: a profiles/... PATH the live chain was reproduced
+#                         from, used ONLY to derive a logical name (basename, profiles/ prefix and
+#                         .profile suffix stripped) when RG_FUZZ_PROFILE_NAME is unset. If NEITHER
+#                         RG_FUZZ_PROFILE_NAME nor RG_FUZZ_PROFILE is set, case distillation on a
+#                         confirmed trip is skipped (with an error) rather than mislabeling the
+#                         case with a guessed profile.
+#   FBT_STATE_CASES       writable dir this driver distills new .case fixtures into on a confirmed
+#                         trip — see _fuzz_resolve_case_dir. NOT the top-level scenarios/ dir
+#                         (read-only once this skill is installed). Resolution order:
+#                         FBT_STATE_CASES -> ${XDG_STATE_HOME}/fbt/cases ->
+#                         ${HOME}/.local/state/fbt/cases; errors if none of
+#                         FBT_STATE_CASES/XDG_STATE_HOME/HOME is set.
 #   FUZZ_JAR              path to tamper-fuzz-all.jar (default
 #                         $SCRIPT_DIR/../tools/tamper-fuzz/build/libs/tamper-fuzz-all.jar)
 #   JAVA_BIN              java executable (default `java` on PATH)
@@ -132,12 +148,16 @@
 #
 # On a confirmed trip this driver: (1) always appends one row to <outdir>/failures.jsonl via
 # failures_lib.sh's failures_append (the still-open defect record); (2) IF bisection isolated a
-# single idx, ALSO writes a scenarios/<name>.case fixture with expect_oracle=reject — this records
-# the TARGET, post-fix behavior per scenarios/README.md's flywheel philosophy, not a claim that
-# the bug is already fixed; replaying it via run_case.sh will legitimately report CASE:FAIL until
-# the underlying defect actually gets fixed, at which point it starts passing and becomes a real
-# regression guard. (2) does NOT happen when bisection was skipped (crash + no RG_FUZZ_RESTART_CMD)
-# or left an unresolved range (no single reproducing input to pin down yet) — only (1) does then.
+# single idx, ALSO writes a status=pending .case fixture (expect_oracle=reject) into the writable
+# case dir resolved by _fuzz_resolve_case_dir (FBT_STATE_CASES — NOT the top-level scenarios/ dir,
+# which is read-only once this skill is installed) — this records the TARGET, post-fix behavior
+# per scenarios/README.md's flywheel philosophy, not a claim that the bug is already fixed;
+# replaying it via run_case.sh will legitimately report CASE:FAIL until the underlying defect
+# actually gets fixed, at which point it starts passing and becomes a real regression guard. (2)
+# does NOT happen when bisection was skipped (crash + no RG_FUZZ_RESTART_CMD), left an unresolved
+# range (no single reproducing input to pin down yet), or a writable case dir / logical profile
+# name could not be resolved (see _fuzz_resolve_case_dir / _fuzz_resolve_profile_name) — only (1)
+# does then.
 set -euo pipefail
 
 if (( BASH_VERSINFO[0] < 4 )); then
@@ -374,6 +394,56 @@ _fuzz_print_dry_plan() {
     echo "DRY: fuzz_bcos: plan: preflight (PIDs + $preflight_desc + baseline oracle) -> per-batch [generate -> inject -> tally -> oracle check] -> on trip: bisect -> distill .case + failures.jsonl -> stop unless RG_FUZZ_CONTINUE=1"
 }
 
+# _fuzz_resolve_case_dir — the writable dir this driver distills new .case fixtures into. NOT the
+# top-level scenarios/ dir (that is read-only once this skill is installed — writing new fixtures
+# there breaks the moment the case moves, per this task's own motivation). Resolution order:
+# FBT_STATE_CASES -> ${XDG_STATE_HOME}/fbt/cases -> ${HOME}/.local/state/fbt/cases. Prints the
+# resolved dir on success (the caller mkdir -p's it — see _fuzz_write_case). Errors (return 1,
+# nothing printed) if NONE of FBT_STATE_CASES/XDG_STATE_HOME/HOME is set — deliberately never
+# bare-references $HOME (or the others) under `set -u`, since that would abort the whole script
+# instead of failing this one lookup cleanly. Ends with an explicit `return 0`/`return 1` on every
+# path — see the module's trailing-`[[ ]]`-under-`set -e` trap note.
+_fuzz_resolve_case_dir() {
+    if [[ -n "${FBT_STATE_CASES:-}" ]]; then
+        echo "$FBT_STATE_CASES"
+        return 0
+    fi
+    if [[ -n "${XDG_STATE_HOME:-}" ]]; then
+        echo "$XDG_STATE_HOME/fbt/cases"
+        return 0
+    fi
+    if [[ -n "${HOME:-}" ]]; then
+        echo "$HOME/.local/state/fbt/cases"
+        return 0
+    fi
+    echo "ERROR: _fuzz_resolve_case_dir: none of FBT_STATE_CASES/XDG_STATE_HOME/HOME is set — cannot resolve a writable case dir" >&2
+    return 1
+}
+
+# _fuzz_resolve_profile_name — the LOGICAL profile name (e.g. "production-enterprise", never a
+# profiles/... path) recorded into a distilled case's `profile =` field — see run_case.sh's
+# _run_case_resolve_profile, the counterpart that turns a bare logical name back into a path.
+# Prefers RG_FUZZ_PROFILE_NAME (the driver should set this explicitly from whatever profile the
+# live chain it is attached to actually is); falls back to deriving a name from RG_FUZZ_PROFILE's
+# basename (profiles/ prefix and .profile suffix both stripped) when RG_FUZZ_PROFILE_NAME is
+# unset. Errors (return 1) when NEITHER is set — deliberately no hardcoded
+# "production-enterprise" fallback here: guessing would silently mislabel a case with a profile
+# the live chain might not actually be running.
+_fuzz_resolve_profile_name() {
+    if [[ -n "${RG_FUZZ_PROFILE_NAME:-}" ]]; then
+        echo "$RG_FUZZ_PROFILE_NAME"
+        return 0
+    fi
+    if [[ -n "${RG_FUZZ_PROFILE:-}" ]]; then
+        local base="${RG_FUZZ_PROFILE##*/}"
+        base="${base%.profile}"
+        echo "$base"
+        return 0
+    fi
+    echo "ERROR: _fuzz_resolve_profile_name: neither RG_FUZZ_PROFILE_NAME nor RG_FUZZ_PROFILE is set — refusing to guess a profile name for the distilled case" >&2
+    return 1
+}
+
 # ---------------------------------------------------------------------------
 # IO helpers — live-chain-only. NOT exercised by tests/fuzz_bcos_test.sh, only defined by sourcing
 # it (function definitions are side-effect-free) — see the execution guard at the bottom.
@@ -534,6 +604,12 @@ _fuzz_preflight() {
     return 0
 }
 
+# _fuzz_write_case <path> <profile> <hex> <seed> <idx> [transport] — writes a distilled .case
+# fixture. <profile> MUST be a bare logical name (e.g. "production-enterprise") — the caller (see
+# _fuzz_resolve_profile_name / the call site below) resolves that before calling in here, never a
+# profiles/... path; run_case.sh's _run_case_resolve_profile is what turns the logical name back
+# into a path at replay time. status=pending marks this as freshly auto-distilled, not yet reviewed
+# — see scenarios/README.md's status field convention.
 _fuzz_write_case() {
     local path="$1" profile="$2" hex="$3" seed="$4" idx="$5" transport="${6:-bcos}"
     mkdir -p "$(dirname "$path")"
@@ -546,6 +622,7 @@ _fuzz_write_case() {
 # reproduce the crash outright); it starts passing, and becomes a real regression guard, once the
 # node is fixed to cleanly reject this input instead. See failures.jsonl for the still-open defect.
 [case]
+status = pending
 profile = $profile
 input = $input_line
 expect_oracle = reject
@@ -747,10 +824,23 @@ _fuzz_run() {
                     echo "CULPRIT: fuzz_bcos: seed=$seed idx=$blo (batch $batch_idx)"
                     local culprit_hex
                     culprit_hex="$("$JAVA_BIN" -jar "$FUZZ_JAR" "$gen_cmd" $((blo + 1)) "$seed" "$strategy" | tail -n1 | cut -f4)"
-                    local case_file="$SCRIPT_DIR/../scenarios/$(_fuzz_case_filename "$seed" "$blo" "$RG_FUZZ_TRANSPORT")"
-                    _fuzz_write_case "$case_file" "${RG_FUZZ_PROFILE:-profiles/production-enterprise.profile}" \
-                        "$culprit_hex" "$seed" "$blo" "$RG_FUZZ_TRANSPORT"
-                    case_written="$case_file"
+                    # Case distillation needs BOTH a writable dir (never the read-only-once-
+                    # installed scenarios/ dir) and a real logical profile name (never a silent
+                    # "production-enterprise" guess) — see _fuzz_resolve_case_dir /
+                    # _fuzz_resolve_profile_name. Either missing means skip distillation (with an
+                    # error) rather than writing a case in the wrong place or mislabeled; the
+                    # failures_append below still records the still-open defect either way.
+                    local case_dir profile_name
+                    if ! case_dir="$(_fuzz_resolve_case_dir)"; then
+                        echo "ERROR: fuzz_bcos: skipping case distillation for seed=$seed idx=$blo — see above" >&2
+                    elif ! profile_name="$(_fuzz_resolve_profile_name)"; then
+                        echo "ERROR: fuzz_bcos: skipping case distillation for seed=$seed idx=$blo — set RG_FUZZ_PROFILE_NAME or RG_FUZZ_PROFILE" >&2
+                    else
+                        local case_file="$case_dir/$(_fuzz_case_filename "$seed" "$blo" "$RG_FUZZ_TRANSPORT")"
+                        _fuzz_write_case "$case_file" "$profile_name" \
+                            "$culprit_hex" "$seed" "$blo" "$RG_FUZZ_TRANSPORT"
+                        case_written="$case_file"
+                    fi
                     failures_append "$outdir" "${RG_FUZZ_PROFILE:-unknown}" "exploration" "crash" "高" \
                         "fuzz_bcos.sh oracle trip: seed=$seed idx=$blo strategy=$strategy batch=$batch_idx" \
                         "java -jar $FUZZ_JAR $gen_cmd $((blo + 1)) $seed $strategy | tail -n1 | cut -f4" \

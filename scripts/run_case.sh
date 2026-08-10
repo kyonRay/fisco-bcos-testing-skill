@@ -18,7 +18,10 @@
 # .case format (INI-like, single [case] section — see scripts/profile_lib.sh for the sibling
 # .profile parser this format deliberately mirrors):
 #   [case]
-#   profile = <path to a .profile file, relative to the repo root>   (required)
+#   profile = <a bare logical profile name (e.g. "production-enterprise", resolved via
+#              ${FBT_PROFILE_DIR:-<repo>/profiles}/<name>.profile), OR a path relative to this
+#              .case file's own dir, OR an absolute path>                          (required —
+#              see _run_case_resolve_profile, the single place this three-way resolution happens)
 #   input = <the command the exploration layer used to reproduce the failure — a console
 #            invocation, a curl to the Web3 RPC, or similar>          (required)
 #   expect_oracle = pass | reject                                     (required)
@@ -119,6 +122,32 @@ case_parse() {
 }
 case_parse "$CASE_PATH"
 
+# _run_case_resolve_profile <spec> <case_dir> — resolve a .case file's `profile =` field to an
+# absolute .profile path. Three forms, checked in order:
+#   - absolute (spec starts with `/`)  -> returned as-is, NEVER joined to case_dir (an already-
+#                                          absolute path means something specific; joining it to
+#                                          case_dir would silently produce a different, wrong path)
+#   - contains a `/` (relative)        -> resolved relative to case_dir (the .case file's own dir)
+#   - bare logical name (no `/` at all) -> ${FBT_PROFILE_DIR:-<repo>/profiles}/<spec>.profile, the
+#                                          same logical-name convention scenario_upgrade.sh's own
+#                                          profile_path resolution note documents
+# Pure — no IO, no file-existence check (the caller's own `[[ -f "$CASE_PROFILE" ]]` guard right
+# after this call site does that). Ends with an explicit `return 0` — see the module's
+# trailing-`[[ ]]`-under-`set -e` trap note: the last statement here is a plain `echo` inside an
+# if/elif/else, which already returns 0 on its own, but the explicit return keeps that fact from
+# depending on which branch ran.
+_run_case_resolve_profile() {
+    local spec="$1" case_dir="$2"
+    if [[ "$spec" == /* ]]; then
+        echo "$spec"
+    elif [[ "$spec" == */* ]]; then
+        echo "$case_dir/$spec"
+    else
+        echo "${FBT_PROFILE_DIR:-$SCRIPT_DIR/../profiles}/$spec.profile"
+    fi
+    return 0
+}
+
 [[ -z "$CASE_PROFILE" ]] && { echo "ERROR: $CASE_PATH: [case] profile= is required" >&2; exit 1; }
 [[ -z "$CASE_INPUT" ]] && { echo "ERROR: $CASE_PATH: [case] input= is required" >&2; exit 1; }
 [[ -z "$CASE_EXPECT_ORACLE" ]] && { echo "ERROR: $CASE_PATH: [case] expect_oracle= is required" >&2; exit 1; }
@@ -168,6 +197,10 @@ fi
 # Real-run — needs live chain. Never reached from --dry-run.
 # ---------------------------------------------------------------------------
 
+# Resolve the (possibly logical) `profile =` field to an absolute path now — the dry-run block
+# above already exited with the raw, unresolved value (stable/logical, per _run_case_resolve_profile's
+# own doc), so only the real-run path below ever sees the resolved absolute path.
+CASE_PROFILE="$(_run_case_resolve_profile "$CASE_PROFILE" "$(dirname "$CASE_PATH")")"
 [[ -f "$CASE_PROFILE" ]] || { echo "ERROR: $CASE_PATH: profile not found: $CASE_PROFILE" >&2; exit 1; }
 
 APPLY_PROFILE="$SCRIPT_DIR/apply_profile.sh"
