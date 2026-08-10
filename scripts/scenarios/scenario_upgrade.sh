@@ -3,11 +3,15 @@
 # replay the release doc's T0-T8 version-upgrade timeline (operation_and_maintenance/upgrade.md,
 # see the sibling fisco-bcos-testing skill's references/version-upgrade.md for the mechanism this
 # encodes) against a locally-reproduced copy of that profile:
-#   T0  reproduce prod            apply_profile.sh -p production-enterprise.profile
+#   T0  reproduce prod            FISCO_BIN=<old_bin> apply_profile.sh -p <profile_path> — the
+#                                  baseline is built from the OLD binary, not this build-dir's own
+#                                  default, and profile_path defaults to production-enterprise but
+#                                  is caller-overridable (5th arg to scenario_upgrade_run)
 #   T1  baseline gate             one-shot crash/liveness/stateroot oracle pass + snapshot each
 #                                  target-version flag's PRE-bump value (expected "null")
-#   T2-T4 rolling binary swap     stop one node -> swap shared binary -> restart -> sample
-#                                  height+hash from 3 nodes -> _upg_no_fork -> repeat per node
+#   T2-T4 rolling binary swap     stop one node -> atomically swap the shared binary (same-dir
+#                                  temp + mv, never a bare cp onto the live target) -> restart ->
+#                                  sample height+hash from 3 nodes -> _upg_no_fork -> repeat per node
 #   T5  bump data version         console setSystemConfigByKey compatibility_version <target_ver>
 #   T6  flag-flip assertion       re-read each target-version flag, _upg_flag_flipped(before,after)
 #   T7  re-run gate               one-shot oracle pass again, must stay consistent with T1
@@ -15,20 +19,25 @@
 #                                  profile's original genesis compatibility_version
 #
 # This file is SOURCED (by gate.sh's `for f in "$SCRIPT_DIR"/scenarios/*.sh; do source "$f";
-# done` loop — see scripts/gate.sh — or standalone by tests/scenario_upgrade_test.sh), so it must
-# not `set -e`/`set -u` at file scope: that would change the sourcing script's own shell options.
-# Registration at the bottom is guarded for the same reason. Matches scenario_ut.sh /
-# scenario_dual_rpc.sh / scenario_malformed.sh's convention exactly.
+# done` loop — see scripts/gate.sh — or standalone by tests/scenario_upgrade_test.sh /
+# tests/upgrade_swap_test.sh), so it must not `set -e`/`set -u` at file scope: that would change
+# the sourcing script's own shell options. Registration at the bottom is guarded for the same
+# reason. Matches scenario_ut.sh / scenario_dual_rpc.sh / scenario_malformed.sh's convention
+# exactly.
 #
-# Design: _upg_no_fork and _upg_flag_flipped are pure functions (no IO) — the two decision
-# points this scenario exists to exercise, and the ONLY part of this file unit-tested by
-# tests/scenario_upgrade_test.sh. _upg_target_flags is a file-read-only helper (parses the real
-# FISCO-BCOS Features.cpp shipped in this checkout — no network, no running chain) that is ALSO
-# hermetically testable and IS exercised by tests/scenario_upgrade_test.sh, per the "facts don't
-# get baked in" editing invariant: the set of bugfix flags a given target version activates is a
-# per-release fact and must be re-derived from source, never hardcoded here. scenario_upgrade_run
-# itself is live-chain-only IO (apply_profile.sh + console + curl + oracle_*.sh) and is NOT
-# exercised by tests, other than its SCENARIO_DRY=1 branch (prints the T0-T8 plan, sends nothing).
+# Design: _upg_no_fork, _upg_flag_flipped, and _upg_t0_apply_argv are pure functions (no IO) —
+# tested directly in tests/scenario_upgrade_test.sh (the first two) and
+# tests/upgrade_swap_test.sh (the third, alongside the real-IO swap helpers below).
+# _upg_target_flags is a file-read-only helper (parses the real FISCO-BCOS Features.cpp shipped in
+# this checkout — no network, no running chain) that is ALSO hermetically testable and IS
+# exercised by tests/scenario_upgrade_test.sh, per the "facts don't get baked in" editing
+# invariant: the set of bugfix flags a given target version activates is a per-release fact and
+# must be re-derived from source, never hardcoded here. _upg_atomic_replace_binary and
+# _upg_swap_node_binary do real file/process IO (mktemp/cp/mv, stop.sh/start.sh) but against a
+# throwaway tmpdir fixture rather than a live chain, so tests/upgrade_swap_test.sh exercises them
+# for real too — see that file. scenario_upgrade_run itself is live-chain-only IO (apply_profile.sh
+# + console + curl + oracle_*.sh) and is NOT exercised by tests, other than its SCENARIO_DRY=1
+# branch (prints the T0-T8 plan, sends nothing).
 #
 # Flag-derivation source of truth: this deliberately greps
 # bcos-framework/bcos-framework/ledger/Features.cpp's setUpgradeFeatures() upgradeRoadmap table
@@ -79,6 +88,13 @@
 
 SCENARIO_UPG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# _UPG_DEFAULT_PROFILE_ABS — the production-enterprise profile's absolute path, resolved relative
+# to this script's own dir (not $PWD), so scenario_upgrade_run's 5th (profile_path) argument has a
+# sane default without needing a caller-provided path. Plain concatenation on top of the already-
+# canonicalized SCENARIO_UPG_DIR (no extra `cd`/`pwd` subshell) so this assignment can never fail
+# under a caller's `set -e` even if the profiles dir happened to be missing.
+_UPG_DEFAULT_PROFILE_ABS="$SCENARIO_UPG_DIR/../../profiles/production-enterprise.profile"
+
 # ---------------------------------------------------------------------------
 # Pure functions — no IO. The core of what tests/scenario_upgrade_test.sh exercises.
 # ---------------------------------------------------------------------------
@@ -111,6 +127,17 @@ _upg_no_fork() {
 _upg_flag_flipped() {
     local before="$1" after="$2"
     [[ ("$before" == "null" || -z "$before") && "$after" == "1" ]]
+}
+
+# _upg_t0_apply_argv <old_bin> <profile_path> <outdir> — fill global UPG_T0_ARGV with the argv T0
+# passes to apply_profile.sh (-p/-o are the only flags that script accepts), and FISCO_BIN_FOR_T0
+# with the binary T0's baseline must be built with. old_bin is deliberately threaded via the env
+# var (apply_profile.sh reads FISCO_BIN — see that script's own header doc), NOT embedded in argv:
+# there is no -e/--bin flag on apply_profile.sh to put a binary path into, and folding it into
+# argv would silently drop it the moment apply_profile.sh's own getopts saw an unrecognized flag.
+_upg_t0_apply_argv() {
+    UPG_T0_ARGV=(-p "$2" -o "$3")
+    FISCO_BIN_FOR_T0="$1"
 }
 
 # ---------------------------------------------------------------------------
@@ -318,14 +345,32 @@ _upg_run_oracle_triad() {
     return $trc
 }
 
-# _upg_swap_node_binary <node_dir_root> <node_name> <bin> — stop the node, overwrite the shared
-# binary, restart it (see header GAP note on why this is a genuine per-node swap despite the
-# binary file being shared across all nodes on this single-machine AIR layout).
+# _upg_atomic_replace_binary <src> <root> — pure file-swap primitive, no stop/start. Copies <src>
+# into a temp file in the SAME directory as the target (<root>, not e.g. $TMPDIR) so the final
+# `mv` is an atomic same-filesystem rename rather than a cross-filesystem copy a reader could catch
+# mid-write, chmods it executable, then mv -f's it onto <root>/fisco-bcos. Deliberately does NOT
+# touch a running node's process (see header GAP note) — _upg_swap_node_binary below wraps this
+# with the stop/start semantics an actual rolling upgrade needs.
+_upg_atomic_replace_binary() {
+    local src="$1" root="$2" tmp
+    tmp="$(mktemp "$root/.fisco-bcos.XXXXXX")"
+    cp "$src" "$tmp"
+    chmod +x "$tmp"
+    mv -f "$tmp" "$root/fisco-bcos"
+}
+
+# _upg_swap_node_binary <node_dir_root> <node_name> <bin> — stop the node, atomically overwrite
+# the shared binary via _upg_atomic_replace_binary, restart it (see header GAP note on why this is
+# a genuine per-node swap despite the binary file being shared across all nodes on this
+# single-machine AIR layout). Previously did a bare `cp` straight onto the live target path — that
+# risked a start.sh racing the write and exec'ing a partially-copied binary (or, on some
+# filesystems, ETXTBSY against the still-running process this same loop is about to restart);
+# _upg_atomic_replace_binary's same-dir-temp-then-rename closes that.
 _upg_swap_node_binary() {
     local root="$1" node_name="$2" bin="$3"
     echo ">> scenario_upgrade: [$node_name] stop -> swap binary -> start ($bin)" >&2
     bash "$root/$node_name/stop.sh"
-    cp "$bin" "$root/fisco-bcos"
+    _upg_atomic_replace_binary "$bin" "$root"
     bash "$root/$node_name/start.sh"
 }
 
@@ -333,7 +378,7 @@ _upg_swap_node_binary() {
 # scenario exercised outside a live chain. Still resolves the real target-version flag list via
 # _upg_target_flags (file-read-only, no network) so the printed T6 step is not a placeholder.
 _upg_dry() {
-    local old_bin="$1" new_bin="$2" target_ver="$3"
+    local old_bin="$1" new_bin="$2" target_ver="$3" profile_path="$4"
     local repo_root features_cpp flags_str="(repo root not found — cannot resolve)"
     if repo_root="$(_upg_find_repo_root)"; then
         features_cpp="$repo_root/bcos-framework/bcos-framework/ledger/Features.cpp"
@@ -352,7 +397,7 @@ _upg_dry() {
             flags_str="$(printf '%s' "$flags_output" | tr '\n' ' ')"
         fi
     fi
-    echo "DRY: scenario_upgrade: T0 reproduce prod: apply_profile.sh -p profiles/production-enterprise.profile"
+    echo "DRY: scenario_upgrade: T0 reproduce prod: FISCO_BIN=$old_bin apply_profile.sh -p $profile_path -o <outdir>"
     echo "DRY: scenario_upgrade: T1 baseline gate: one-shot crash/liveness/stateroot oracle pass; snapshot pre-bump value of each target flag"
     echo "DRY: scenario_upgrade: T2-T4 rolling binary swap: per node, stop -> swap $old_bin -> $new_bin -> start -> sample 3 nodes' height+hash -> _upg_no_fork"
     echo "DRY: scenario_upgrade: T5 bump data version: console setSystemConfigByKey compatibility_version $target_ver"
@@ -361,18 +406,24 @@ _upg_dry() {
     echo "DRY: scenario_upgrade: T8 optional rollback (UPGRADE_ROLLBACK=1 only): swap binaries back to $old_bin, restore original compatibility_version"
 }
 
-# scenario_upgrade_run <outdir> <old_bin> <new_bin> <target_ver> — execute the T0-T8 timeline
-# above. Live-chain-only: needs a fisco-bcos checkout with a completed build (both binaries), a
-# running BCOS RPC cluster reproduced by T0, and console.sh. Returns 1 if any non-optional T-step
-# fails; T8 is skipped (not failed) unless UPGRADE_ROLLBACK=1.
+# scenario_upgrade_run <outdir> <old_bin> <new_bin> <target_ver> [profile_path] — execute the
+# T0-T8 timeline above. profile_path is an ABSOLUTE path (default: _UPG_DEFAULT_PROFILE_ABS, the
+# production-enterprise profile); a host CLI resolving a logical profile NAME rather than a path
+# should do so via ${FBT_PROFILE_DIR:-<script_dir>/../../profiles}/<name>.profile before calling
+# in here, since this function itself only ever consumes an already-resolved path. Live-chain-only:
+# needs a fisco-bcos checkout with a completed build (both binaries), a running BCOS RPC cluster
+# reproduced by T0 FROM old_bin (not this build-dir's own default binary — see _upg_t0_apply_argv),
+# and console.sh. Returns 1 if any non-optional T-step fails; T8 is skipped (not failed) unless
+# UPGRADE_ROLLBACK=1.
 scenario_upgrade_run() {
     local outdir="${1:-.}"
     local old_bin="${2:-}"
     local new_bin="${3:-}"
     local target_ver="${4:-}"
+    local profile_path="${5:-$_UPG_DEFAULT_PROFILE_ABS}"
 
     if [[ "${SCENARIO_DRY:-0}" == 1 ]]; then
-        _upg_dry "${old_bin:-<old_bin>}" "${new_bin:-<new_bin>}" "${target_ver:-<target_ver>}"
+        _upg_dry "${old_bin:-<old_bin>}" "${new_bin:-<new_bin>}" "${target_ver:-<target_ver>}" "$profile_path"
         return 0
     fi
 
@@ -386,6 +437,10 @@ scenario_upgrade_run() {
     }
     [[ -x "$new_bin" ]] || {
         echo "ERROR: scenario_upgrade: new_bin not executable: $new_bin" >&2
+        return 1
+    }
+    [[ -f "$profile_path" ]] || {
+        echo "ERROR: scenario_upgrade: profile not found: $profile_path" >&2
         return 1
     }
 
@@ -421,12 +476,17 @@ scenario_upgrade_run() {
     # step logs made this scenario fail at its very first step, every time — it killed itself on
     # its own log directory. apply_profile.sh/build_chain create the directory; anything that wants
     # to log into it does so after T0 returns.
-    local profile="$SCENARIO_UPG_DIR/../../profiles/production-enterprise.profile"
     local node_dir_root="$outdir/127.0.0.1"
     local rc=0
 
-    echo "-- scenario_upgrade: T0 reproduce prod"
-    bash "$SCENARIO_UPG_DIR/../apply_profile.sh" -p "$profile" -o "$outdir" || {
+    echo "-- scenario_upgrade: T0 reproduce prod (old_bin=$old_bin, profile=$profile_path)"
+    # T0's baseline MUST be built from old_bin, not this build-dir's own default fisco-bcos binary
+    # — otherwise T2-T4's "swap old -> new" never actually starts from the old version, and the
+    # whole rolling-upgrade timeline this scenario exists to exercise tests nothing. old_bin is
+    # threaded via the FISCO_BIN env var (apply_profile.sh reads it, see that script's own header
+    # doc), not argv — _upg_t0_apply_argv fills UPG_T0_ARGV with only -p/-o.
+    _upg_t0_apply_argv "$old_bin" "$profile_path" "$outdir"
+    FISCO_BIN="$FISCO_BIN_FOR_T0" bash "$SCENARIO_UPG_DIR/../apply_profile.sh" "${UPG_T0_ARGV[@]}" || {
         echo "FAIL: scenario_upgrade: T0 apply_profile.sh failed" >&2
         return 1
     }
@@ -453,7 +513,7 @@ scenario_upgrade_run() {
     # SCENARIO_DRPC_ORACLE_LIB source uses (see its comment): only reached on a real run, never by
     # SCENARIO_DRY=1 or by merely sourcing this file.
     source "$SCENARIO_UPG_DIR/../oracle_lib.sh"
-    profile_load "$profile"
+    profile_load "$profile_path"
     local web3_port="${PROFILE_CONFIG[web3_rpc.listen_port]:-8545}"
     local rpc_url="http://127.0.0.1:${web3_port}"
 
