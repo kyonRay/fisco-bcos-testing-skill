@@ -35,8 +35,9 @@
 #                         injection endpoint when RG_FUZZ_TRANSPORT=web3 (see below) — the live
 #                         Web3 RPC serves both eth_sendRawTransaction and the oracle-polled
 #                         eth_blockNumber/eth_chainId on the same port.
-#   RG_FUZZ_TRANSPORT     bcos | web3 (default bcos). Which RPC surface this driver injects
-#                         mutants against — see _fuzz_generator_subcommand / _fuzz_inject_and_classify.
+#   RG_FUZZ_TRANSPORT     bcos | web3 | web3method (default bcos). Which RPC surface this driver
+#                         injects mutants against — see _fuzz_generator_subcommand /
+#                         _fuzz_inject_and_classify.
 #                           - bcos (default, UNCHANGED behavior): generator subcommand `fuzz`
 #                             (FuzzGenerator, tars-encoded BCOS tx), injected via sendTransaction
 #                             <groupID, nodeName, hex> to BCOS_RPC_URL, preflight confirms
@@ -47,6 +48,20 @@
 #                             bisection, restart hook, and .case distillation are all reused
 #                             UNCHANGED — only the generator subcommand name and the injection
 #                             payload/endpoint differ (see _fuzz_case_filename, _fuzz_write_case).
+#                           - web3method: generator subcommand `ethmethodfuzz`
+#                             (EthMethodFuzzGenerator, whole eth_*/net_*/web3_* method surface —
+#                             see that class's doc). UNLIKE bcos/web3, the generator's own last TSV
+#                             column is ALREADY a complete JSON-RPC request body (method varies per
+#                             idx), so there is no payload-wrapping step — see
+#                             _fuzz_inject_payload_web3method (identity). Injected against
+#                             RG_FUZZ_WEB3_URL via a STDIN PIPE, not `curl -d`
+#                             (_fuzz_inject_and_classify) — the bytes strategy emits arbitrary
+#                             characters (quotes/backslash/$/backtick/single-quote) that `curl -d
+#                             "$payload"` would let the shell mis-interpret; piping the payload
+#                             through stdin (`printf '%s' "$payload" | curl --data-binary @-`)
+#                             means the shell never parses the body at all. Preflight is identical
+#                             to web3's (same eth_chainId check — see _fuzz_preflight's `web3*`
+#                             branch).
 #   RG_FUZZ_STATEROOT_URLS  comma-separated EXTRA node Web3 RPC URLs to compare stateRoot against
 #                         RG_FUZZ_WEB3_URL. GAP: this driver has no profile/cluster-layout wiring
 #                         to auto-discover other nodes' ports (see run_case.sh / gate.sh's own
@@ -224,11 +239,13 @@ _fuzz_bisect_upper_half() {
 # _fuzz_case_filename <seed> <idx> [transport] — single source of truth for a distilled case's
 # filename, so the code that writes it and anything that later needs to find it agree. transport
 # defaults to "bcos" (RG_FUZZ_TRANSPORT unset/bcos), reproducing the original filename exactly —
-# only transport="web3" changes the name, so an existing (seed,idx) BCOS case's filename/identity
-# never changes.
+# only transport="web3"/"web3method" changes the name, so an existing (seed,idx) BCOS case's
+# filename/identity never changes.
 _fuzz_case_filename() {
     local seed="$1" idx="$2" transport="${3:-bcos}"
-    if [[ "$transport" == "web3" ]]; then
+    if [[ "$transport" == "web3method" ]]; then
+        echo "fuzz_ethmethod_seed${seed}_idx${idx}.case"
+    elif [[ "$transport" == "web3" ]]; then
         echo "fuzz_web3_seed${seed}_idx${idx}.case"
     else
         echo "fuzz_seed${seed}_idx${idx}.case"
@@ -236,12 +253,15 @@ _fuzz_case_filename() {
 }
 
 # _fuzz_generator_subcommand [transport] — single source of truth for which tamper-fuzz-all.jar
-# subcommand this driver invokes: `fuzz` (FuzzGenerator, BCOS) or `web3fuzz` (Web3FuzzGenerator,
-# Web3-RPC). transport defaults to $RG_FUZZ_TRANSPORT when omitted (the live call-site
-# convention); tests pass it explicitly to stay hermetic.
+# subcommand this driver invokes: `fuzz` (FuzzGenerator, BCOS), `web3fuzz` (Web3FuzzGenerator,
+# Web3-RPC tx payload), or `ethmethodfuzz` (EthMethodFuzzGenerator, whole method surface).
+# transport defaults to $RG_FUZZ_TRANSPORT when omitted (the live call-site convention); tests
+# pass it explicitly to stay hermetic.
 _fuzz_generator_subcommand() {
     local transport="${1:-$RG_FUZZ_TRANSPORT}"
-    if [[ "$transport" == "web3" ]]; then
+    if [[ "$transport" == "web3method" ]]; then
+        echo "ethmethodfuzz"
+    elif [[ "$transport" == "web3" ]]; then
         echo "web3fuzz"
     else
         echo "fuzz"
@@ -264,15 +284,45 @@ _fuzz_inject_payload_web3() {
     echo "{\"jsonrpc\":\"2.0\",\"method\":\"eth_sendRawTransaction\",\"params\":[\"${hex}\"],\"id\":1}"
 }
 
-# _fuzz_inject_curl_cmd <hex> [transport] — pure formatter for the exact curl command a distilled
-# .case's `input =` line records (see _fuzz_write_case). transport defaults to $RG_FUZZ_TRANSPORT.
-# For the default bcos transport this reproduces the original hardcoded `input =` line verbatim.
+# _fuzz_inject_payload_web3method <envelope> — identity. EthMethodFuzzGenerator's own 4th TSV
+# column is ALREADY a complete JSON-RPC request body (method varies per idx, unlike
+# bcos/web3 whose payload builders wrap a bare hex into a fixed method) — there is nothing left to
+# wrap. Kept as its own named function (rather than inlining `printf '%s' "$1"` at the call sites)
+# purely so _fuzz_inject_and_classify / _fuzz_inject_curl_cmd dispatch on transport the same
+# uniform way the bcos/web3 payload builders do.
+_fuzz_inject_payload_web3method() {
+    printf '%s' "$1"
+}
+
+# _fuzz_sq_escape <string> — pure bash single-quote escaper: turns `string` into the body that
+# goes BETWEEN a pair of single quotes so the whole thing re-parses to the original bytes,
+# replacing each embedded `'` with `'\''` (close quote, escaped literal quote, reopen quote) — the
+# standard POSIX-shell idiom for single-quoting a string that may itself contain single quotes.
+# Load-bearing for _fuzz_inject_curl_cmd's web3method branch: the bytes strategy emits arbitrary
+# characters including raw `'`, and a distilled .case's `input =` line must single-quote the
+# payload for `run_case.sh` (`bash -c "$CASE_INPUT"`) to replay it byte-identically.
+_fuzz_sq_escape() {
+    local s="$1"
+    printf '%s' "${s//\'/\'\\\'\'}"
+}
+
+# _fuzz_inject_curl_cmd <payload> [transport] — pure formatter for the exact curl command a
+# distilled .case's `input =` line records (see _fuzz_write_case). transport defaults to
+# $RG_FUZZ_TRANSPORT. For the default bcos transport this reproduces the original hardcoded
+# `input =` line verbatim. <payload> is a bare hex for bcos/web3 but a COMPLETE JSON-RPC envelope
+# for web3method (see _fuzz_inject_payload_web3method) — the web3method branch below single-quotes
+# and pipes THAT envelope verbatim via stdin (`printf '%s' '<sq-escaped>' | curl --data-binary
+# @-`), never via `curl -d`, so replaying the recorded line reproduces the exact bytes byte-for-
+# byte regardless of what characters the bytes strategy corrupted the envelope with — see the
+# RG_FUZZ_TRANSPORT header doc's web3method entry for why `-d` is unsafe for this payload.
 _fuzz_inject_curl_cmd() {
-    local hex="$1" transport="${2:-$RG_FUZZ_TRANSPORT}"
-    if [[ "$transport" == "web3" ]]; then
-        echo "curl -sS -X POST -H 'Content-Type: application/json' -d '$(_fuzz_inject_payload_web3 "$hex")' $RG_FUZZ_WEB3_URL"
+    local payload="$1" transport="${2:-$RG_FUZZ_TRANSPORT}"
+    if [[ "$transport" == "web3method" ]]; then
+        echo "printf '%s' '$(_fuzz_sq_escape "$payload")' | curl -sS -X POST -H 'Content-Type: application/json' --data-binary @- $RG_FUZZ_WEB3_URL"
+    elif [[ "$transport" == "web3" ]]; then
+        echo "curl -sS -X POST -H 'Content-Type: application/json' -d '$(_fuzz_inject_payload_web3 "$payload")' $RG_FUZZ_WEB3_URL"
     else
-        echo "curl -sS -X POST -H 'Content-Type: application/json' -d '$(_fuzz_inject_payload_bcos "$hex")' $BCOS_RPC_URL"
+        echo "curl -sS -X POST -H 'Content-Type: application/json' -d '$(_fuzz_inject_payload_bcos "$payload")' $BCOS_RPC_URL"
     fi
 }
 
@@ -299,14 +349,16 @@ _fuzz_print_dry_plan() {
     local mode value gen preflight_desc
     read -r mode value < <(_fuzz_plan_mode "$iters" "$sec")
     gen="$(_fuzz_generator_subcommand "$transport")"
-    if [[ "$transport" == "web3" ]]; then
+    if [[ "$transport" == web3* ]]; then
         preflight_desc="Web3 RPC"
     else
         preflight_desc="BCOS RPC"
     fi
     echo "DRY: fuzz_bcos: base_seed=$base_seed strategy=$strategy batch_size=$batch"
     echo "DRY: fuzz_bcos: transport=$transport generator=$gen"
-    if [[ "$transport" == "web3" ]]; then
+    if [[ "$transport" == "web3method" ]]; then
+        echo "DRY: fuzz_bcos: inject target: Web3 RPC $RG_FUZZ_WEB3_URL (arbitrary eth_*/net_*/web3_* method call, full JSON-RPC envelope per mutant)"
+    elif [[ "$transport" == "web3" ]]; then
         echo "DRY: fuzz_bcos: inject target: Web3 RPC $RG_FUZZ_WEB3_URL (eth_sendRawTransaction)"
     else
         echo "DRY: fuzz_bcos: inject target: BCOS RPC $BCOS_RPC_URL (sendTransaction)"
@@ -332,6 +384,21 @@ _fuzz_discover_pids() {
 
 _fuzz_inject_and_classify() {
     local hex="$1" resp payload url
+    if [[ "$RG_FUZZ_TRANSPORT" == "web3method" ]]; then
+        # CRITICAL — see the RG_FUZZ_TRANSPORT header doc's web3method entry: the ethmethodfuzz
+        # bytes strategy emits arbitrary characters (quotes/backslash/$/backtick/single-quote) in
+        # $hex (really a full JSON-RPC envelope here — see _fuzz_inject_payload_web3method). A
+        # bare `curl -d "$payload"` would hand that text to the shell inside double quotes, which
+        # DOES interpret $/`/\ — silently mutating the mutant before it ever reaches curl and
+        # producing a false green (the node never even saw the intended bytes). Piping the payload
+        # through stdin means the shell only ever sees the fixed literal command below; the
+        # payload itself is never re-parsed as shell syntax.
+        payload="$(_fuzz_inject_payload_web3method "$hex")"
+        url="$RG_FUZZ_WEB3_URL"
+        resp="$(printf '%s' "$payload" | curl -sS -m 10 -H 'Content-Type: application/json' --data-binary @- "$url" 2>/dev/null)" || resp=""
+        _fuzz_classify_response "$resp"
+        return
+    fi
     if [[ "$RG_FUZZ_TRANSPORT" == "web3" ]]; then
         payload="$(_fuzz_inject_payload_web3 "$hex")"
         url="$RG_FUZZ_WEB3_URL"
@@ -418,7 +485,11 @@ _fuzz_preflight() {
     echo ">> fuzz_bcos: preflight: discovered PIDs: ${NODE_PIDS[*]}"
 
     local resp
-    if [[ "$RG_FUZZ_TRANSPORT" == "web3" ]]; then
+    if [[ "$RG_FUZZ_TRANSPORT" == web3* ]]; then
+        # web3method uses the SAME preflight as web3 — both inject against and are oracle-polled
+        # via RG_FUZZ_WEB3_URL, so confirming eth_chainId answers is the identical liveness check
+        # either transport needs before fuzzing starts. `web3*` matches both "web3" and
+        # "web3method" (and nothing else RG_FUZZ_TRANSPORT can be); bcos preflight is untouched.
         echo ">> fuzz_bcos: preflight: confirming Web3 RPC answers eth_chainId at $RG_FUZZ_WEB3_URL"
         resp="$(curl -sS -m 10 -H 'Content-Type: application/json' \
             -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \

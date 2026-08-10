@@ -55,6 +55,10 @@ public final class TamperFuzz {
             System.exit(runWeb3FuzzMode(args) ? 0 : 1);
             return;
         }
+        if (args.length >= 1 && "ethmethodfuzz".equals(args[0])) {
+            System.exit(runEthMethodFuzzMode(args) ? 0 : 1);
+            return;
+        }
         if (args.length != 1) {
             System.err.println(
                     "usage: java -jar tamper-fuzz-all.jar <illegal_to|oob_field|bad_signature>"
@@ -62,7 +66,9 @@ public final class TamperFuzz {
                             + " | fuzz <count> <seed> <struct|bytes|both>"
                             + " | fuzz --selfcheck"
                             + " | web3fuzz <count> <seed> <struct|bytes|both>"
-                            + " | web3fuzz --selfcheck");
+                            + " | web3fuzz --selfcheck"
+                            + " | ethmethodfuzz <count> <seed> <struct|bytes|both>"
+                            + " | ethmethodfuzz --selfcheck");
             System.exit(1);
             return;
         }
@@ -151,6 +157,46 @@ public final class TamperFuzz {
             return false;
         } catch (Exception e) {
             System.err.println("ERROR: tamper-fuzz: web3fuzz: unexpected failure: " + e);
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /** `ethmethodfuzz <count> <seed> <strategy>` — print <count> deterministic mutant TSV lines
+     * (see EthMethodFuzzGenerator's class doc). `ethmethodfuzz --selfcheck` runs
+     * EthMethodFuzzGenerator.selfCheck() instead (determinism + count-independence + struct
+     * valid-JSON assertions, output to stderr). Mirrors runFuzzMode/runWeb3FuzzMode's exit-code
+     * contract exactly. Unlike those two, EthMethodFuzzGenerator.generate() is a pure function
+     * (no JNI/crypto-suite construction), so there is no checked exception to funnel through
+     * here beyond the shared NumberFormatException/IllegalArgumentException handling. */
+    private static boolean runEthMethodFuzzMode(String[] args) {
+        if (args.length == 2 && "--selfcheck".equals(args[1])) {
+            return EthMethodFuzzGenerator.selfCheck();
+        }
+        if (args.length != 4) {
+            System.err.println(
+                    "usage: java -jar tamper-fuzz-all.jar ethmethodfuzz <count> <seed>"
+                            + " <struct|bytes|both> | ethmethodfuzz --selfcheck");
+            return false;
+        }
+        try {
+            int count = Integer.parseInt(args[1]);
+            long seed = Long.parseLong(args[2]);
+            String strategy = args[3];
+            for (String line : EthMethodFuzzGenerator.generate(count, seed, strategy)) {
+                System.out.println(line);
+            }
+            return true;
+        } catch (NumberFormatException e) {
+            System.err.println(
+                    "ERROR: tamper-fuzz: ethmethodfuzz: <count> and <seed> must be integers: "
+                            + e.getMessage());
+            return false;
+        } catch (IllegalArgumentException e) {
+            System.err.println("ERROR: tamper-fuzz: ethmethodfuzz: " + e.getMessage());
+            return false;
+        } catch (Exception e) {
+            System.err.println("ERROR: tamper-fuzz: ethmethodfuzz: unexpected failure: " + e);
             e.printStackTrace();
             return false;
         }

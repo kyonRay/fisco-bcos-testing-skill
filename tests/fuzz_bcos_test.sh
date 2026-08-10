@@ -77,36 +77,55 @@ done
 assert_eq "fuzz_seed42_idx7.case" "$(_fuzz_case_filename 42 7)" "case filename encodes seed and idx (2-arg call, unchanged from before the transport switch)"
 assert_eq "fuzz_seed42_idx7.case" "$(_fuzz_case_filename 42 7 bcos)" "case filename: explicit bcos transport matches the default"
 assert_eq "fuzz_web3_seed42_idx7.case" "$(_fuzz_case_filename 42 7 web3)" "case filename: web3 transport gets a distinguishing fuzz_web3_ prefix"
+assert_eq "fuzz_ethmethod_seed7_idx3.case" "$(_fuzz_case_filename 7 3 web3method)" "case filename: web3method transport gets a distinguishing fuzz_ethmethod_ prefix (Entry 4)"
 
 # ---------------------------------------------------------------------------
 # _fuzz_generator_subcommand — which tamper-fuzz-all.jar subcommand a transport drives.
 # ---------------------------------------------------------------------------
 assert_eq "fuzz" "$(_fuzz_generator_subcommand bcos)" "generator subcommand: bcos -> fuzz"
 assert_eq "web3fuzz" "$(_fuzz_generator_subcommand web3)" "generator subcommand: web3 -> web3fuzz"
+assert_eq "ethmethodfuzz" "$(_fuzz_generator_subcommand web3method)" "generator subcommand: web3method -> ethmethodfuzz (Entry 4)"
 RG_FUZZ_TRANSPORT=bcos
 assert_eq "fuzz" "$(_fuzz_generator_subcommand)" "generator subcommand: no-arg call reads RG_FUZZ_TRANSPORT (bcos)"
 RG_FUZZ_TRANSPORT=web3
 assert_eq "web3fuzz" "$(_fuzz_generator_subcommand)" "generator subcommand: no-arg call reads RG_FUZZ_TRANSPORT (web3)"
+RG_FUZZ_TRANSPORT=web3method
+assert_eq "ethmethodfuzz" "$(_fuzz_generator_subcommand)" "generator subcommand: no-arg call reads RG_FUZZ_TRANSPORT (web3method)"
 # Reset to the script's own default (NOT unset — fuzz_bcos.sh runs under `set -u`, and later code
 # in this file, e.g. _fuzz_reinject_range_and_check below, reads RG_FUZZ_TRANSPORT indirectly via
 # _fuzz_generator_subcommand's no-arg fallback; leaving it unbound would trip nounset there).
 RG_FUZZ_TRANSPORT=bcos
 
 # ---------------------------------------------------------------------------
-# _fuzz_inject_payload_bcos / _fuzz_inject_payload_web3 — pure JSON-RPC payload builders. The
-# whole point of the web3 leg: eth_sendRawTransaction takes a single hex string in params, NOT the
-# BCOS <groupID, nodeName, hex> triple.
+# _fuzz_inject_payload_bcos / _fuzz_inject_payload_web3 / _fuzz_inject_payload_web3method — pure
+# JSON-RPC payload builders. bcos/web3 wrap a bare hex; web3method is pure identity — its
+# generator's own last TSV column IS already a complete JSON-RPC envelope (method varies per idx),
+# so there is no wrapping left to do (see that function's own doc in fuzz_bcos.sh).
 # ---------------------------------------------------------------------------
 BCOS_GROUP_ID=group0
 assert_eq '{"jsonrpc":"2.0","method":"sendTransaction","params":["group0","","0xdead"],"id":1}' \
     "$(_fuzz_inject_payload_bcos 0xdead)" "bcos payload: groupID/nodeName/hex triple"
 assert_eq '{"jsonrpc":"2.0","method":"eth_sendRawTransaction","params":["0xdead"],"id":1}' \
     "$(_fuzz_inject_payload_web3 0xdead)" "web3 payload: single hex string in params, not a triple"
+assert_eq '{"a":1}' "$(_fuzz_inject_payload_web3method '{"a":1}')" \
+    "web3method payload: identity — the generator's own envelope column passes through unchanged"
+
+# ---------------------------------------------------------------------------
+# _fuzz_sq_escape — pure bash single-quote escaper (Entry 4). Load-bearing for the web3method
+# .case `input =` line: the bytes strategy emits arbitrary characters including raw `'`, and this
+# is the ONLY thing standing between that and a corrupted/unparseable distilled .case.
+# ---------------------------------------------------------------------------
+assert_eq "a'\\''b" "$(_fuzz_sq_escape "a'b")" "sq_escape: a single embedded quote becomes the '\\'' idiom"
+assert_eq "no_quotes_here" "$(_fuzz_sq_escape "no_quotes_here")" "sq_escape: no embedded quote is a no-op"
+assert_eq "'\\''start" "$(_fuzz_sq_escape "'start")" "sq_escape: quote at the very start is escaped too"
+assert_eq "end'\\''" "$(_fuzz_sq_escape "end'")" "sq_escape: quote at the very end is escaped too"
 
 # ---------------------------------------------------------------------------
 # _fuzz_inject_curl_cmd — the exact curl command a distilled .case's `input =` line records. For
 # the default bcos transport this must reproduce the ORIGINAL hardcoded input= line verbatim (see
-# the case-writer's own doc) — a byte-for-byte non-regression check.
+# the case-writer's own doc) — a byte-for-byte non-regression check. web3method (Entry 4) is the
+# odd one out: it pipes the sq-escaped envelope through stdin rather than `curl -d`, per the
+# escaping design in fuzz_bcos.sh's RG_FUZZ_TRANSPORT header doc.
 # ---------------------------------------------------------------------------
 BCOS_RPC_URL=http://127.0.0.1:20200
 RG_FUZZ_WEB3_URL=http://127.0.0.1:8545
@@ -114,6 +133,10 @@ assert_eq "curl -sS -X POST -H 'Content-Type: application/json' -d '{\"jsonrpc\"
     "$(_fuzz_inject_curl_cmd 0xdead bcos)" "inject curl cmd: bcos transport targets BCOS_RPC_URL with sendTransaction"
 assert_eq "curl -sS -X POST -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"method\":\"eth_sendRawTransaction\",\"params\":[\"0xdead\"],\"id\":1}' http://127.0.0.1:8545" \
     "$(_fuzz_inject_curl_cmd 0xdead web3)" "inject curl cmd: web3 transport targets RG_FUZZ_WEB3_URL with eth_sendRawTransaction"
+assert_eq "printf '%s' '{\"a\":1}' | curl -sS -X POST -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:8545" \
+    "$(_fuzz_inject_curl_cmd '{"a":1}' web3method)" "inject curl cmd: web3method pipes via stdin (--data-binary @-), not -d"
+assert_eq "printf '%s' 'a'\\''b' | curl -sS -X POST -H 'Content-Type: application/json' --data-binary @- http://127.0.0.1:8545" \
+    "$(_fuzz_inject_curl_cmd "a'b" web3method)" "inject curl cmd: web3method sq-escapes an embedded single-quote in the payload"
 
 # ---------------------------------------------------------------------------
 # _fuzz_print_dry_plan — pure formatting, no IO (the only live-touching parts of fuzz_bcos.sh are
@@ -138,6 +161,13 @@ assert_contains "$out_web3" "transport=web3 generator=web3fuzz" "dry plan (web3 
 assert_contains "$out_web3" "eth_sendRawTransaction" "dry plan (web3 transport): reports the eth_sendRawTransaction inject target"
 assert_contains "$out_web3" "preflight (PIDs + Web3 RPC + baseline oracle)" "dry plan (web3 transport): Web3 RPC preflight wording"
 assert_not_contains "$out_web3" "ERROR" "dry plan (web3 transport): never touches a live chain either"
+
+# web3method dry plan (Entry 4): must name the ethmethodfuzz generator and the SAME Web3 RPC /
+# eth_chainId preflight web3 uses (both inject against and are oracle-polled via RG_FUZZ_WEB3_URL).
+out_web3method="$(_fuzz_print_dry_plan 42 20 0 100 both web3method)"
+assert_contains "$out_web3method" "transport=web3method generator=ethmethodfuzz" "dry plan (web3method transport): reports the ethmethodfuzz generator"
+assert_contains "$out_web3method" "preflight (PIDs + Web3 RPC + baseline oracle)" "dry plan (web3method transport): reuses the Web3 RPC / eth_chainId preflight wording"
+assert_not_contains "$out_web3method" "ERROR" "dry plan (web3method transport): never touches a live chain either"
 
 # ---------------------------------------------------------------------------
 # _fuzz_should_bisect — pure RG_FUZZ_RESTART_CMD gating decision (Bug 2). Bisecting a genuine
