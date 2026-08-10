@@ -20,7 +20,7 @@
 #                      distribution is absent, the same way scenario_malformed refuses without
 #                      TAMPER_HELPER. Build it anywhere with a JDK 8/11 and copy dist/ over — it is
 #                      pure Java, so it does not have to be built on the machine under test.
-#   java               on PATH (JDK 8+).
+#   java               on PATH (JDK 8+), or JAVA_BIN pointed at a specific java binary.
 #   a live chain       already brought up and funded by apply_profile.sh (the account this
 #                      scenario signs with is the genesis auth_admin, which apply_profile funds).
 #
@@ -32,6 +32,9 @@
 #   JSD_COUNT          per-run transaction count (default 50, as in the CI script)
 #   JSD_QPS            per-run send rate (default 10, as in the CI script)
 #   BCOS_RPC_URL       BCOS RPC endpoint the demos connect to (default http://127.0.0.1:20200)
+#   JAVA_BIN           java binary to invoke (default: java, resolved via PATH) — an installed
+#                      libexec layout may not have java on PATH under the account the gate runs
+#                      as, so this lets the caller point at a specific binary.
 
 SCENARIO_JSD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -119,7 +122,7 @@ _jsd_dry() {
         cls="${entry%%:*}"
         users="${entry##*:}"
         for dag in true false; do
-            echo "DRY: scenario_jsd: java -cp 'conf/:lib/*:apps/*' org.fisco.bcos.sdk.demo.perf.$cls ${JSD_GROUP:-group0} $users ${JSD_COUNT:-50} ${JSD_QPS:-10} $dag"
+            echo "DRY: scenario_jsd: ${JAVA_BIN:-java} -cp 'conf/:lib/*:apps/*' org.fisco.bcos.sdk.demo.perf.$cls ${JSD_GROUP:-group0} $users ${JSD_COUNT:-50} ${JSD_QPS:-10} $dag"
         done
     done
     echo "DRY: scenario_jsd: each run verified via _jsd_verdict (exit 0 + 'total balance equal expectBalance' + no non-zero Errors tally)"
@@ -142,7 +145,7 @@ scenario_jsd_run() {
         echo "       Refusing to report a pass for load coverage that never ran." >&2
         return 1
     fi
-    command -v java >/dev/null 2>&1 || { echo "ERROR: scenario_jsd: java not on PATH" >&2; return 1; }
+    command -v "${JAVA_BIN:-java}" >/dev/null 2>&1 || { echo "ERROR: scenario_jsd: ${JAVA_BIN:-java} not on PATH (set JAVA_BIN to a specific binary)" >&2; return 1; }
 
     _jsd_wire "$jsd_dir" "${RG_CLUSTER_DIR:-./nodes-release-gate}" || return 1
 
@@ -154,7 +157,7 @@ scenario_jsd_run() {
         for dag in true false; do
             echo ">> scenario_jsd: $cls users=$users count=${JSD_COUNT:-50} qps=${JSD_QPS:-10} dag=$dag" | tee -a "$log" >&2
             rc=0
-            out="$(cd "$jsd_dir" && java -cp "conf/:lib/*:apps/*" \
+            out="$(cd "$jsd_dir" && "${JAVA_BIN:-java}" -cp "conf/:lib/*:apps/*" \
                 "org.fisco.bcos.sdk.demo.perf.$cls" \
                 "${JSD_GROUP:-group0}" "$users" "${JSD_COUNT:-50}" "${JSD_QPS:-10}" "$dag" 2>&1)" || rc=$?
             echo "$out" >> "$log"

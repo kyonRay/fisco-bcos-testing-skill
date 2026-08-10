@@ -14,21 +14,38 @@
 #                    only in a live FISCO-BCOS checkout with a completed cmake build.
 #   BUILD_DIR        override the FISCO-BCOS build tree to search (default: <repo root>/build,
 #                    matching run_ut.sh's own default).
+#   FBT_REPO_ROOT    override repo-root discovery outright (no upward walk) — needed in an
+#                    installed libexec layout, where this script no longer lives inside a
+#                    FISCO-BCOS checkout for tools/BcosAirBuilder/build_chain.sh to walk up to.
+#   FBT_ENGINE_SCRIPTS  directory to look for run_ut.sh in first (ahead of the dev-checkout
+#                    sibling fisco-bcos-testing/scripts) — the other half of the libexec case.
 
 SCENARIO_UT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# SCENARIO_UT_SELF_DIR is the resolver's "own dir" candidate — overridable so tests can eval just
+# the resolver function against a fixture dir without sourcing this whole file.
+SCENARIO_UT_SELF_DIR="${SCENARIO_UT_SELF_DIR:-$SCENARIO_UT_DIR}"
 
-# Sibling skill's UT runner — resolved relative to THIS script's own dir (not cwd). This skill
-# is normally checked out at <repo>/.claude/skills/fisco-bcos-release-gate/, a sibling of
-# <repo>/.claude/skills/fisco-bcos-testing/ (see apply_profile.sh's analogous
-# "$SCRIPT_DIR/../../fisco-bcos-testing/scripts/cluster_up.sh" one directory up); this script
-# lives one directory deeper, under scripts/scenarios/, hence one extra "..".
-SCENARIO_UT_RUN_UT="$SCENARIO_UT_DIR/../../../fisco-bcos-testing/scripts/run_ut.sh"
+# _scenario_ut_resolve_run_ut — abs path to the sibling fisco-bcos-testing run_ut.sh, tried in
+# the SAME order apply_profile.sh's _resolve_engine_script uses: $FBT_ENGINE_SCRIPTS (installed
+# libexec layout with no sibling checkout) -> this script's own dir -> the dev-checkout sibling.
+# This script lives one directory deeper than apply_profile.sh (under scripts/scenarios/, not
+# scripts/), hence the extra ".." on the sibling candidate. Returns 1 if none of the three has it.
+_scenario_ut_resolve_run_ut() {
+    local c
+    for c in "${FBT_ENGINE_SCRIPTS:-}" "$SCENARIO_UT_SELF_DIR" "$SCENARIO_UT_SELF_DIR/../../../fisco-bcos-testing/scripts"; do
+        [[ -n "$c" && -f "$c/run_ut.sh" ]] && { echo "$c/run_ut.sh"; return 0; }
+    done
+    return 1
+}
 
-# scenario_ut_find_repo_root — walk up from this script's own dir (not $PWD) looking for the
-# same repo marker run_ut.sh's own find_repo_root uses, so BUILD_DIR discovery is cwd-independent
-# too. Not a reimplementation of run_ut.sh's per-module binary lookup/fallback — only enough to
-# locate the build tree once so we can enumerate which modules were actually built.
+# scenario_ut_find_repo_root — honors $FBT_REPO_ROOT first (an installed libexec layout has no
+# tools/BcosAirBuilder/build_chain.sh marker to walk up to, so the caller must say where the repo
+# is). Otherwise walk up from this script's own dir (not $PWD) looking for the same repo marker
+# run_ut.sh's own find_repo_root uses, so BUILD_DIR discovery is cwd-independent too. Not a
+# reimplementation of run_ut.sh's per-module binary lookup/fallback — only enough to locate the
+# build tree once so we can enumerate which modules were actually built.
 scenario_ut_find_repo_root() {
+    [[ -n "${FBT_REPO_ROOT:-}" ]] && { echo "$FBT_REPO_ROOT"; return 0; }
     local d="$SCENARIO_UT_DIR"
     while [[ "$d" != "/" ]]; do
         [[ -f "$d/tools/BcosAirBuilder/build_chain.sh" ]] && { echo "$d"; return 0; }
@@ -42,15 +59,15 @@ scenario_ut_find_repo_root() {
 # GATE_SCENARIOS dispatch currently calls scenario functions with no arguments) but unused here:
 # UT has no cluster to write logs under, and run_ut.sh already prints PASS/FAIL to stdout/stderr.
 scenario_ut_run() {
-    local repo_root build_dir
+    local repo_root build_dir run_ut
     repo_root="$(scenario_ut_find_repo_root)" || {
-        echo "ERROR: scenario_ut: not inside a FISCO-BCOS checkout (no tools/BcosAirBuilder/build_chain.sh found above $SCENARIO_UT_DIR)" >&2
+        echo "ERROR: scenario_ut: not inside a FISCO-BCOS checkout (no tools/BcosAirBuilder/build_chain.sh found above $SCENARIO_UT_DIR, and \$FBT_REPO_ROOT not set)" >&2
         return 1
     }
     build_dir="${BUILD_DIR:-$repo_root/build}"
 
-    [[ -f "$SCENARIO_UT_RUN_UT" ]] || {
-        echo "ERROR: scenario_ut: sibling skill script not found: $SCENARIO_UT_RUN_UT (expected the fisco-bcos-testing skill checked out alongside this one)" >&2
+    run_ut="$(_scenario_ut_resolve_run_ut)" || {
+        echo "ERROR: scenario_ut: run_ut.sh not found (tried \$FBT_ENGINE_SCRIPTS, $SCENARIO_UT_SELF_DIR, sibling fisco-bcos-testing/scripts — expected the fisco-bcos-testing skill checked out alongside this one, or FBT_ENGINE_SCRIPTS set)" >&2
         return 1
     }
 
@@ -90,7 +107,7 @@ scenario_ut_run() {
 
     if [[ "${SCENARIO_DRY:-0}" == 1 ]]; then
         for module in "${modules[@]}"; do
-            echo "DRY: BUILD_DIR=$build_dir bash $SCENARIO_UT_RUN_UT $module"
+            echo "DRY: BUILD_DIR=$build_dir bash $run_ut $module"
         done
         return 0
     fi
@@ -98,7 +115,7 @@ scenario_ut_run() {
     local rc=0
     for module in "${modules[@]}"; do
         echo ">> scenario_ut: running module UT: $module"
-        BUILD_DIR="$build_dir" bash "$SCENARIO_UT_RUN_UT" "$module" || rc=1
+        BUILD_DIR="$build_dir" bash "$run_ut" "$module" || rc=1
     done
     return $rc
 }

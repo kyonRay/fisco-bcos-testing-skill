@@ -37,6 +37,10 @@ if (( BASH_VERSINFO[0] < 4 )); then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# _SELF_DIR is the resolver's "own dir" candidate — overridable so tests/relocatable_test.sh can
+# eval just the _resolve_engine_script function body (below) against a fixture dir without
+# sourcing this whole script.
+_SELF_DIR="${_SELF_DIR:-$SCRIPT_DIR}"
 
 PROFILE_PATH=""
 OUTDIR="./nodes-release-gate"
@@ -82,6 +86,19 @@ _apply_profile_cluster_up_args() {
     [[ -n "$web3_base" ]] && APPLY_CU_ARGS+=(-w "$web3_base")
     [[ "$sm_mode" == "1" ]] && APPLY_CU_ARGS+=(-s)
     return 0
+}
+
+# _resolve_engine_script <name> — abs path to a sibling fisco-bcos-testing engine script (e.g.
+# cluster_up.sh), tried in order: $FBT_ENGINE_SCRIPTS (an installed libexec layout with no sibling
+# checkout points this at wherever the engine scripts actually live) -> this script's own dir
+# ($_SELF_DIR) -> the dev-checkout sibling ../../fisco-bcos-testing/scripts. Returns 1 (nothing on
+# stdout) if none of the three candidates has the file — the caller decides how to fail.
+_resolve_engine_script() {
+    local n="$1" c
+    for c in "${FBT_ENGINE_SCRIPTS:-}" "$_SELF_DIR" "$_SELF_DIR/../../fisco-bcos-testing/scripts"; do
+        [[ -n "$c" && -f "$c/$n" ]] && { echo "$c/$n"; return 0; }
+    done
+    return 1
 }
 
 # _apply_profile_web3_port <profile_listen_port> <node_index> <web3_base_override> — the
@@ -151,8 +168,15 @@ fi
 # ---------------------------------------------------------------------------
 
 # CLUSTER_UP is overridable via env for testing (a spy/recorder script stands in for the real
-# cluster_up.sh so a test can assert the real call's argv without a live chain).
-CLUSTER_UP="${CLUSTER_UP:-$SCRIPT_DIR/../../fisco-bcos-testing/scripts/cluster_up.sh}"
+# cluster_up.sh so a test can assert the real call's argv without a live chain). When not
+# overridden, resolve it via _resolve_engine_script so an installed libexec layout (no sibling
+# fisco-bcos-testing checkout) can point FBT_ENGINE_SCRIPTS at wherever the engine scripts live.
+if [[ -z "${CLUSTER_UP:-}" ]]; then
+    CLUSTER_UP="$(_resolve_engine_script cluster_up.sh)" || {
+        echo "ERROR: cluster_up.sh not found (tried \$FBT_ENGINE_SCRIPTS, $_SELF_DIR, sibling fisco-bcos-testing/scripts — expected the fisco-bcos-testing skill checked out alongside this one, or FBT_ENGINE_SCRIPTS set)" >&2
+        exit 1
+    }
+fi
 [[ -f "$CLUSTER_UP" ]] || {
     echo "ERROR: sibling skill script not found: $CLUSTER_UP (expected the fisco-bcos-testing skill checked out alongside this one)" >&2
     exit 1

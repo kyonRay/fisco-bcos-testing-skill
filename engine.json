@@ -1,0 +1,6 @@
+{
+  "engine_protocol_version": "1.0.0",
+  "event_schema_version": "1.0.0",
+  "output_schema_version": "1.0.0",
+  "capabilities": ["gate", "cluster", "case", "fuzz", "upgrade", "ut"]
+}
