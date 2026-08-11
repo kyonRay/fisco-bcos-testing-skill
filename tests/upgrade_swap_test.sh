@@ -34,6 +34,15 @@ assert_eq "NEW" "$(cat "$root1/fisco-bcos")" "atomic_replace_binary: target now 
 assert_eq "1" "$([[ -x "$root1/fisco-bcos" ]] && echo 1 || echo 0)" "atomic_replace_binary: target is executable"
 assert_eq "0" "$(ls "$root1"/.fisco-bcos.* 2>/dev/null | wc -l | tr -d ' ')" "atomic_replace_binary: no .fisco-bcos.* temp file leaked"
 
+# Mode, not just the x bit: mktemp creates 0600, so the old `chmod +x` landed on 0711 and silently
+# stripped the group/other READ bits a build_chain-generated binary ships with. Asserting -x alone
+# passed against that bug (exec only needs x) — this pins the actual mode. Live-observed 0755->0711
+# on a real node3 swap before the fix.
+_mode_of() {  # portable: GNU stat -c, BSD/macOS stat -f
+    if stat -c '%a' "$1" >/dev/null 2>&1; then stat -c '%a' "$1"; else stat -f '%Lp' "$1"; fi
+}
+assert_eq "755" "$(_mode_of "$root1/fisco-bcos")" "atomic_replace_binary: target mode is 0755, not mktemp's 0600+x=0711"
+
 # ---------------------------------------------------------------------------
 # _upg_swap_node_binary <root> <node_name> <src> — order stop -> replace -> start, via fake
 # stop.sh/start.sh scripts that each snapshot the binary's CURRENT content into a shared log.

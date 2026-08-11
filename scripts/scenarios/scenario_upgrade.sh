@@ -348,14 +348,21 @@ _upg_run_oracle_triad() {
 # _upg_atomic_replace_binary <src> <root> — pure file-swap primitive, no stop/start. Copies <src>
 # into a temp file in the SAME directory as the target (<root>, not e.g. $TMPDIR) so the final
 # `mv` is an atomic same-filesystem rename rather than a cross-filesystem copy a reader could catch
-# mid-write, chmods it executable, then mv -f's it onto <root>/fisco-bcos. Deliberately does NOT
+# mid-write, sets it to mode 0755, then mv -f's it onto <root>/fisco-bcos. Deliberately does NOT
 # touch a running node's process (see header GAP note) — _upg_swap_node_binary below wraps this
 # with the stop/start semantics an actual rolling upgrade needs.
+#
+# `chmod 755`, not `chmod +x`: mktemp deliberately creates its file 0600, and `+x` only ADDS the
+# execute bits, landing on 0711 — so every rolling swap silently stripped the group/other READ
+# bits a build_chain-generated fisco-bcos ships with (0755). Nothing fails loudly, because exec
+# needs only the x bit, but the deployed binary's mode drifts on each upgrade and any non-owner
+# reader of it (checksum verification, backup, debugger) starts getting EACCES. Observed live:
+# 0755 -> 0711 after one node3 swap.
 _upg_atomic_replace_binary() {
     local src="$1" root="$2" tmp
     tmp="$(mktemp "$root/.fisco-bcos.XXXXXX")"
     cp "$src" "$tmp"
-    chmod +x "$tmp"
+    chmod 755 "$tmp"
     mv -f "$tmp" "$root/fisco-bcos"
 }
 
