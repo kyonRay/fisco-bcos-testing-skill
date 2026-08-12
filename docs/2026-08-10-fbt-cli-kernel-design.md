@@ -1,7 +1,8 @@
 # FBT CLI 内核骨架 设计文档(子项目 1)
 
 **日期**:2026-08-10(经两轮外部评审修订)
-**状态**:待评审(brainstorming 产出,尚未进 writing-plans)
+**状态**:**已进入实现**。子项目 1A(CLI 内核核心)已按本文落地(见 `internal/`);1B(命令面与进程模型)进行中。
+**权威性**:**本文件是唯一权威副本**——它随代码一起版本控制,克隆本仓即可看到。任何外部工作区里的同名文件都是镜像,以本文为准。
 **范围**:`fisco-bcos-testing` CLI 工具的第 1 个子项目——CLI 内核骨架。整体是把三个 skill(`fisco-bcos-release-gate`/`fisco-bcos-testing`/`fisco-bcos-vuln-hunt`)合并为名为 `fisco-bcos-testing`、二进制名 `fbt` 的命令行工具。
 **前置依赖**:**子项目 0(引擎信任与可重定位修复)**必须先合入——见 `2026-08-10-fbt-subproject0-engine-trust-fixes-design.md`。本文多处(升级、多节点 stateRoot、可写 case 目录、engine.json)依赖它。
 
@@ -43,7 +44,8 @@ Go 宿主承担:命令面(§6)、配置解析与翻译(§7)、消费引擎事件
 - **引擎可脱离宿主单跑**:`emit_event` 在 fd 3 未打开时 no-op。**不机械把现有 bash stdout 改写成 stderr**——Go 分别捕获子进程 stdout/stderr,machine 模式下宿主只写自己的 stdout 保证纯净,借此保留 standalone bash 行为(修正上一版"人读日志改走 stderr"的过度改动)。
 - **分发布局(已决)**:见 §5;引擎脚本随包发布,外部重依赖 config 指向 + doctor 预检。
 - **host/engine 协议版本号**:`engine.json`(子项目 0 修复 5)带 `schema_version`,宿主**碰链前**校验;不兼容 → `40`。
-- **零 AI、零云**:`--ai on`/未实现旗标用即返回 `20`(显式失败,不静默 no-op);无网络调用。
+- **零 AI、零云**:`--ai on`/未实现旗标用即返回 `20`(显式失败,不静默 no-op)。**"无网络调用"是运行期约束**——`fbt` 跑起来后不发任何网络请求(除了对本地链 RPC 的探测);**构建期不在此约束内**,`go build` 需要拉取一次 `gopkg.in/yaml.v3`。要求完全离线构建的环境须 `go mod vendor` 后提交 `vendor/`。
+- **`--ai` 只接受 `on`/`off`**:其余值(含拼写错误)返回 `20`,不得因"不等于 on"而当作 `off` 静默放行。
 - **目标平台**:交叉编译 linux/amd64、linux/arm64、darwin/arm64;驱动引擎需 bash 4,缺失由 doctor 报 `30`。
 - **Java fuzz jar 外部调用**,不并入 Go 构建。
 
@@ -61,7 +63,13 @@ $XDG_STATE_HOME/fbt/cases        # fuzz 生成 + 用户维护,可写(子项目 0
 $XDG_STATE_HOME/fbt/clusters     # cluster 注册表(§10)
 ```
 
-**路径规则**:`state = ${XDG_STATE_HOME:-$HOME/.local/state}/fbt`;`config = ${XDG_CONFIG_HOME:-$HOME/.config}/fbt/config.yaml`。CI 中 XDG 与 `HOME` 都不可用时,要求显式 `--state-dir`/`--config`,否则 `20`。`--engine-dir` 指**整个安装根**(含 `libexec/` 与 `share/`),同时覆盖 profiles/cases 的查找基。`engine.json` **三个版本号分列**(engine 协议 / 事件 schema / 对外 output schema,不共用一个名),宿主碰链前校验协议兼容 → 不符 `40`。shipped(`share/fbt/cases`)与 state(`$XDG_STATE_HOME/fbt/cases`)两个 registry 枚举时:并集、按 basename 排序;**同名 basename → 冲突返回 `20`**(不静默覆盖)。
+**路径规则**:`state = ${XDG_STATE_HOME:-$HOME/.local/state}/fbt`;`config = ${XDG_CONFIG_HOME:-$HOME/.config}/fbt/config.yaml`。CI 中 XDG 与 `HOME` 都不可用时,要求**同时**显式给出 `--state-dir` **和** `--config`(缺任一即 `20`)——两者各自的默认位置都依赖这两个环境变量,只补其一仍有一个无处可寻。
+
+**`--config` 的存在性语义**(两种缺失必须区别对待):
+- **显式** `--config <path>` 指向不存在的文件 → `30`。用户点名的配置消失了却被当作空配置,等于他的全部设置被静默丢弃。
+- 默认位置(`./fbt.yaml`、XDG、HOME)没有配置文件 → 正常空配置,不报错。
+
+**`fbt.yaml` 内相对路径**的基准是该 YAML 文件所在目录(见 §7.3),因此宿主必须在解析后立即把它们绝对化;判定 `./fbt.yaml` 是否存在所用的**启动 CWD 也是解析器的显式输入**,不得直接读进程 CWD——否则测试无法隔离,且仓库里一旦出现同名文件就会改变行为。`--engine-dir` 指**整个安装根**(含 `libexec/` 与 `share/`),同时覆盖 profiles/cases 的查找基。`engine.json` **三个版本号分列**(engine 协议 / 事件 schema / 对外 output schema,不共用一个名),宿主碰链前校验协议兼容 → 不符 `40`。shipped(`share/fbt/cases`)与 state(`$XDG_STATE_HOME/fbt/cases`)两个 registry 枚举时:并集、按 basename 排序;**同名 basename → 冲突返回 `20`**(不静默覆盖)。
 
 **`fbt doctor`——每个命令一张独立依赖矩阵**(修正上一版"基础依赖对所有碰链命令一刀切"):
 - **`gate run`(全量)**:FISCO checkout/节点二进制/console/bash4/curl/pgrep/java + JSD/Node+Viem/UT 二进制/TAMPER helper(对无过滤全量都**必需**)→ 缺失 `30`、启动前终止;`--scenarios malformed` 则不要求 Node/Viem/JSD。
@@ -104,7 +112,7 @@ $XDG_STATE_HOME/fbt/clusters     # cluster 注册表(§10)
 | `fbt fuzz run --transport … [--seed --batch --iters --strategy --restart-cmd]` | `fuzz_bcos.sh` | 探索层;不并入全量;`gate run --with-fuzz` 预留,用即 `20`。 |
 | `fbt case run <case>` / `fbt case list [--status active\|pending\|example\|all]` | `run_case.sh` | 单条回放返回**真实结果**(status 只影响 aggregate);list 默认列 active。 |
 | `fbt profile list` / `fbt profile show <name>` | `profile_lib.sh` | 解析后四段。 |
-| `fbt config show [--command <cmd>] [-p <profile>]` / `fbt config path` | 新增 | 打印最终配置+每项来源;敏感项脱敏(§7.4)。 |
+| `fbt config show [--command <cmd>] [-p <profile>] [--all-keys]` / `fbt config path` | 新增 | 打印最终配置+每项来源;敏感项脱敏(§7.4)。`--command` 按该命令的依赖面过滤;`--all-keys` 列出注册表全部可用键(含未设值的)——未知键的报错会提示用户"用 `config show` 查看完整键表",若只枚举已设值的键,这句提示就是空头支票。**"最终配置"指五层合并后的结果**,必须含内置默认值层与 flag 层,而不只是配置文件里写了什么。 |
 | `fbt doctor [--command <cmd>] [-p <profile>] [--scenarios …]` | 新增(§5) | 按命令+选择集预检。 |
 
 ### 6.4 `.case` 状态策略(修正:status 必填,pending 不进门禁)
@@ -131,6 +139,17 @@ $XDG_STATE_HOME/fbt/clusters     # cluster 注册表(§10)
 
 `-p <name>`:含 `/` 或以 `.profile` 结尾 → 路径;否则名字,在 `share/fbt/profiles/`(及 `--engine-dir` 覆盖)查找 `<name>.profile`,多处命中 → `20` 冲突。`fbt.yaml` 查找顺序:`--config` > `./fbt.yaml` > `$XDG_CONFIG_HOME/fbt/config.yaml`。
 
+**`.profile` 的重复键语义**(权威实现是 `scripts/profile_lib.sh:75,79`):
+
+```bash
+[[ -v PROFILE_REPLAY["$key"] ]] || PROFILE_REPLAY_ORDER+=("$key")
+PROFILE_REPLAY["$key"]="$value"
+```
+
+即**首次出现决定顺序位置,末次赋值决定最终值,同一个 key 只回放一次**。`[system_config_replay]` 与 `[config_ini_override]` 两段都适用。任何重新实现(如 Go 宿主的解析器)必须一致——若改成逐条追加,同一个 key 会被回放两次,而 `auth_check_status` 这类一次性开关的第二次调用会直接返回 `Permission denied`。
+
+`[genesis] compatibility_version` **必填**:它驱动 `build_chain -v` 与整条升级路径,缺失时应在解析阶段即报 `20`,而不是把空值一路带到起链命令。
+
 ### 7.3 相对路径基准(评审补充)
 
 - **CLI 传入路径**:相对宿主启动 CWD;
@@ -149,11 +168,18 @@ $XDG_STATE_HOME/fbt/clusters     # cluster 注册表(§10)
 
 | 配置键 | legacy env | 键域 | 命令 |
 |---|---|---|---|
-| `repo.root` | (新增) | run-env | 全部(引擎子进程 CWD) |
+| `repo.root` | `FBT_REPO_ROOT`(子0 引入) | run-env | 全部(引擎子进程 CWD) |
 | `tools.fisco_bin` | (新增) | run-env | doctor/cluster/upgrade |
 | `tools.java_bin` | `JAVA_BIN` | run-env | ut/fuzz(**注**:`scenario_jsd.sh:145` 今天裸调 `java`、不读 `JAVA_BIN`;子项目 0 修复 5 令 jsd 一并读 `JAVA_BIN`) |
 | `tools.fuzz_jar` | `FUZZ_JAR` > `TAMPER_FUZZ_JAR`(别名,前者优先) | run-env | malformed/fuzz |
 | `tools.tamper_helper` | `TAMPER_HELPER` | run-env | malformed |
+| `tools.tamper_block_limit` | `TAMPER_BLOCK_LIMIT` | run-env | malformed(**读取点在 `tools/tamper-fuzz/tamper-helper.sh:20`,不在 `scripts/` 下**——穷尽核对的扫描面必须含 `tools/`) |
+| `cluster.contract_name` | `BCOS_CONTRACT_NAME`(默认 `HelloWorld`) | run-env | dual_rpc |
+| `fuzz.profile_path` | `RG_FUZZ_PROFILE` | run-env | fuzz |
+| `fuzz.profile_name` | `RG_FUZZ_PROFILE_NAME`(子0 引入,写 `.case` 时必需) | run-env | fuzz |
+| `engine.scripts_dir` | `FBT_ENGINE_SCRIPTS`(子0 引入) | run-env | 全部(引擎脚本解析) |
+| `engine.profile_dir` | `FBT_PROFILE_DIR`(子0 引入) | run-env | case/fuzz |
+| `engine.state_cases` | `FBT_STATE_CASES`(子0 引入) | run-env | fuzz(蒸馏 `.case` 的可写目录) |
 | `tools.web3_private_key` 🔒 | `WEB3_PRIVATE_KEY` | run-env | dual_rpc |
 | `tools.console_dir` | `CONSOLE_DIR` | run-env | dual_rpc/gate |
 | `tools.build_dir` | `BUILD_DIR` | run-env | doctor/cluster(**≠ repo.root**) |
@@ -175,7 +201,56 @@ $XDG_STATE_HOME/fbt/clusters     # cluster 注册表(§10)
 | `jsd.dir/count/qps/group` | `JSD_*` | run-env | jsd |
 | `upgrade.rollback` | `UPGRADE_ROLLBACK` | run-env | upgrade |
 
-**传递方式**:所有 run-env 键均由翻译层 **export 为 env** 注入子进程(与今天 bash 读 env 的方式一致);唯升级测试的 old_bin/new_bin/target_ver/profile 与 §5 拓扑参数走 **argv**(经子项目 0 的共享 argv builder)。此表为**穷尽表**的骨架——实现计划第一步是 `grep -rhoE '\b[A-Z][A-Z0-9_]{3,}\b' scripts/` 核对无遗漏键(已知次要项 `POLL_INTERVAL`/`SAMPLES` 等为脚本内部量,不对外暴露)。
+**传递方式**:所有 run-env 键均由翻译层 **export 为 env** 注入子进程(与今天 bash 读 env 的方式一致);唯升级测试的 old_bin/new_bin/target_ver/profile 与 §5 拓扑参数走 **argv**(经子项目 0 的共享 argv builder)。
+
+**穷尽性已核对(2026-08-11)**,扫描 `${VAR:-}` 形式的读取点,覆盖**三个目录**:`fisco-bcos-release-gate/scripts`、`fisco-bcos-release-gate/tools`、sibling `fisco-bcos-testing/scripts`,共 18 个 `.sh`、55 个变量。核对必须**断言扫描结果非空**(文件数与变量数的下限),否则路径写错时会空跑通过。
+
+**确认为脚本内部量、不对外暴露**(在脚本内被赋值,或为脚本自身 flag 的默认值):
+
+| 变量 | 位置 | 为什么不暴露 |
+|---|---|---|
+| `RPC_URL` / `POLL_INTERVAL` / `SAMPLES` | `oracle_liveness.sh:32-34` | 该脚本自己的 flag 默认值,宿主通过 `-r`/`-b` 传参而非 env |
+| `BIN` | `run_ut.sh:43` | 脚本内先算出再校验 |
+| `COMPAT_VERSION` | `cluster_up.sh` getopts | argv 驱动(`-v`),不走 env |
+| `JSD_RUNS` / `MAL_CASES` / `CLUSTER_OUTDIR` / `CLUSTER_OUTDIR_ABS` / `FAILURES_FILE` / `FAILURES_OUTDIR` / `FILE_ID` / `SHEET_ID` / `FISCO_BIN_FOR_T0` | 各自脚本内 | 无条件赋值 |
+| `APPLY_PROFILE` | `gate.sh:167` | 无条件赋值,env 覆盖不了(**不属于下节的剥离名单**) |
+| `HOME` / `XDG_STATE_HOME` | — | 宿主自己拥有的环境,不是穿透项 |
+
+### 7.5 剥离名单(必须从继承环境中主动删除)
+
+引擎里有一类变量,值决定的不是"用什么参数",而是**执行哪个脚本**或**要不要真干活**。它们存在的目的是让 bash 单测注入 spy。宿主若把自己的环境原样传给子进程,这些变量会被继承:
+
+| 变量 | 读取点 | 被继承的后果 |
+|---|---|---|
+| `STATEROOT_ORACLE` | `oracle_lib.sh:153` `bash "${STATEROOT_ORACLE:-…}"` | stateRoot oracle 被替换;换成恒打印 OK 的脚本,跨节点分叉永不报告 |
+| `CLUSTER_UP` | `apply_profile.sh:174` 守卫、`:190` 执行 | 起链脚本被替换 |
+| `_SELF_DIR` | `apply_profile.sh:43` | 移动 `_resolve_engine_script` 的搜索起点,间接换掉引擎脚本 |
+| `SCENARIO_UT_SELF_DIR` | `scenario_ut.sh:26` | 同上,`run_ut.sh` 的解析位置 |
+| `SCENARIO_DRY` | `scenario_dual_rpc.sh:375` `[[ "${SCENARIO_DRY:-0}" == 1 ]]` | **场景打印计划后直接返回 0,一行活不干,整轮门禁全绿** |
+
+要求:这五个变量**不绑定任何配置键**、**不接受 env 输入**、**在启动子进程前从继承环境中删除**。`SCENARIO_DRY` 尤其要紧——开发机上跑过一次 dry-run、变量留在 shell 里,之后每次 `fbt gate run` 都会静默变成空跑却仍返回 `0`,这正是本工具存在所要防的事故形态。剥离是正确性措施,不是可选加固。
+
+### 7.6 env 是输入方向,需要反向映射
+
+§7.1 把 env 列为配置层之一,但 env 里的名字是 **legacy 名**(`RG_FUZZ_BATCH`),不是 canonical 键(`fuzz.batch`)。本节的表描述的是 canonical → env(注入子进程)的**正向**;作为配置层读取环境需要**反向**映射 env → canonical。两个方向共用同一张表,但反向映射必须:
+
+- 忽略表未绑定的任何环境变量(不能把 `PATH` 变成配置);
+- 忽略 §7.5 的全部剥离名;
+- 同一键有主名与别名同时存在时(`FUZZ_JAR` 与 `TAMPER_FUZZ_JAR`),**主名优先**。
+
+### 7.7 host-only 键也进同一张表
+
+宿主自己消费、不注入引擎的键(`run.fail_fast`、`run.allow_parallel`、`run.timeout_sec`,以及 `cluster.node_count`、`cluster.p2p_base_port`、`crypto.sm_mode` 这类只影响 argv 组装的键)**同样登记在这张表里,只是 env 列为空**。理由:配置文件的键合法性、类型、枚举、范围校验只能有一个来源;把 host-only 键放进另一个没有类型信息的集合,会让 `fuzz.batch: abc` 被挡下而 `run.timeout_sec: abc` 溜过去。
+
+### 7.8 `[config_ini_override]` 只有显式列出的条目成为配置键
+
+`.profile` 的 `[config_ini_override]` 绝大多数条目(`executor.enable_dag`、`txpool.limit`、`rpc.enable_ssl` …)是**节点 `config.ini` 的补丁**,由 `apply_profile.sh` 直接从 profile 文件读取并写入节点配置,**不是 fbt 的配置键**。只有同时决定宿主行为的条目才映射成 canonical 键,当前仅一条:
+
+| profile 条目 | canonical 键 | 为什么 |
+|---|---|---|
+| `web3_rpc.listen_port` | `cluster.web3_base_port` | 宿主的 oracle URL 发现与 `cluster_up -w` 透传都需要它 |
+
+映射表**显式列举,不做前缀通配猜测**;未列出的条目原样留给引擎。
 
 ## 8. 两层事件流与输出协议
 
@@ -191,7 +266,15 @@ $XDG_STATE_HOME/fbt/clusters     # cluster 注册表(§10)
 ```
 中间的 `error` 事件只负责**诊断**;最终退出码映射**只认终止事件的 `outcome`**。据此 §9 用"某引擎子进程缺 `command_finished`"判其异常(而非旧稿"缺 `run_finished`")。**`EXIT`/`trap` 必须在参数/profile 解析之前安装**,确保早期配置错误也产出带 `outcome=config_error` 的终止事件,不出现"早退无终止事件"。
 
-**信封归属**:原始 fd 3 事件**只带 `schema_version + ev + payload`**;`run_id`/`seq`/`ts`/`source` 由 **Go 宿主归一化时统一添加**——全局 `seq` 不由多个 bash 进程各自维护。
+**信封归属**:原始 fd 3 事件**只带 `schema_version`、`ev`,以及若干扁平的 payload 字段**;`run_id`/`seq`/`ts`/`source` 由 **Go 宿主归一化时统一添加**——全局 `seq` 不由多个 bash 进程各自维护。
+
+**事件是扁平的,不是嵌套的**(事件字典里每一条都形如 `{"ev":"scenario_started","name":"malformed"}`)。宿主把除 `ev`/`schema_version` 之外的顶层字段收进自己的 payload 结构。**顶层若出现名为 `payload` 的键,视为协议不符 → `40`**:那意味着引擎换了封装方式,静默产生双层嵌套会让所有下游取不到字段。
+
+**`schema_version` 必填**。宿主在读流前已从 `engine.json` 拿到 `event_schema_version`(§5),归一化时须逐条校验:缺失、非字符串、或 major 与 manifest 不符 → `40`。("fd 3 未打开时 `emit_event` 是 no-op"只说明**事件不会产生**,并不意味着已产生的事件可以缺字段;manifest 校验也只证明引擎声称的版本,不证明每条事件真的符合。)
+
+**交付顺序**:多个引擎进程并发写 fd 3 时,宿主分配 `seq` 与向消费者交付事件**必须在同一临界区内**,否则 `seq` 顺序可能与实际交付顺序相反,黄金事件流夹具将不可复现。
+
+**数值精度**:payload 解析必须保留数值原始文本(Go 侧用 `json.Decoder.UseNumber()`),不得一律转成浮点——区块高度、wei 数额等大整数经 `float64` 会丢精度。
 
 **JSON 安全**:fd 3 事件的字符串字段(`.case`/profile 文件名、路径可能含引号)经 **`emit_event` 内的真正 JSON 转义 helper**(或百分号编码)输出,宿主再校验;能约束为标识符字符集的字段就约束。自由文本(错误详情、repro、日志片段)**不进事件**,写 `failures.jsonl`(`failures_append` 已有字段)或证据文件,事件只带路径。
 
@@ -224,6 +307,12 @@ $XDG_STATE_HOME/fbt/clusters     # cluster 注册表(§10)
 
 映射依据"子进程退出码 + `error.class` + `command_finished`":`error.class=infra` 或集群未起 → `30`;`command_finished.status=fail` 且是门禁判决 → `10`;缺 `command_finished` 且子进程死 → `40`。**超时特判**:宿主因超时主动杀进程组时,**保留先前判定的 `timeout=30`(链无响应),不得因随后"进程被信号杀死"覆盖成 `40`**。多结果按 §10 优先级取最严重。
 
+**超时特判只压制"信号致死"这一类,不压制真实宿主错误。** 聚合器需要区分两个入口:"子进程被信号杀死"在超时已判定后被忽略(那是宿主自己发的 kill),而事件解析失败、协议不符等真实宿主错误**在任何情况下都不被压制**。若笼统地在超时后忽略一切 `40`,一个真实缺陷会被一条无关的慢链掩盖。
+
+**退出码归一**:聚合器对任何不在这六个码之内的输入一律归为 `40`,不得原样透出——否则一次编码疏漏就能让进程以任意状态码退出,而所有按这六个码分支的 CI 规则都会误读。
+
+**并发契约**:聚合器会被多个引擎子进程的读取协程并发调用,其状态变更必须加锁。特别是"超时判定"与"信号致死"两者若发生竞态,可能把宿主主动发起的 kill 误判成 `40`。
+
 ## 10. 进程、清理与并发模型
 
 - **run_id + workspace**:每轮唯一 `run_id` + 隔离 workspace(cluster 目录、证据、failures.jsonl 在其下)。
@@ -239,6 +328,10 @@ $XDG_STATE_HOME/fbt/clusters     # cluster 注册表(§10)
 - 子进程被信号终止且无 `command_finished`(非宿主主动超时所致)→ `40`,原样透出 stderr 尾部。
 - 配置解析失败(YAML 语法/未知键/类型)在**任何子进程启动前** `20`,附出错键路径。
 - 非 `0` 退出,`--output json` 输出顶层 `{"exit":N,"class":"...","reason":"...","evidence_path":"..."}`。
+
+**所有失败路径都必须走结构化输出,无一例外。** 下列路径极易被漏掉,实现时逐条对照:全局旗标解析失败、未知命令、未知子命令、子命令自身的局部旗标解析失败、`profile show` 缺少参数、`--ai` 取值非法、`--config` 指向不存在的文件。任何一条只往 stderr 打印散文而不产出 envelope,消费方就必须回退到解析人读文本——这正是 `--output json` 要消灭的东西。
+
+**静态命令与 `jsonl` 的关系必须明确。** `--output jsonl` 的语义是"宿主归一化后的事件流",而 `config`/`profile`/`plan` 这类不产生事件的静态命令没有流可发。二选一并写死:要么输出**单条 JSONL**(把该命令的 json 文档压成一行),要么直接返回 `20` 表示该命令不支持 jsonl。**不允许的做法是静默退化成 human 表格**——那会让 `--output jsonl` 的调用方拿到无法解析的内容却得到退出码 `0`。本设计取**单条 JSONL**。
 
 ## 12. 测试策略
 

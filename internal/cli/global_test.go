@@ -202,3 +202,44 @@ func TestGlobalFlagsAlsoWorkAfterTheCommandName(t *testing.T) {
 		t.Errorf("args = %q, want [rest]", p.args)
 	}
 }
+
+// spec §11: every failure path must be structured, without exception. A global flag error is the
+// easiest one to miss, because it happens before the flag package has parsed --output -- and a
+// machine consumer that asked for json must not get prose on stderr instead.
+func TestGlobalFlagErrorsRespectTheRequestedOutputShape(t *testing.T) {
+	table := map[string]Command{"probe": (&probe{}).cmd()}
+	for _, argv := range [][]string{
+		{"--output", "json", "--nonesuch", "probe"},
+		{"--output=json", "--nonesuch", "probe"},
+		{"-output", "json", "--nonesuch", "probe"},
+		{"--output", "json", "--ai", "banana", "probe"},
+	} {
+		code, out, errOut := run(t, table, argv...)
+		if code != exitcode.Config {
+			t.Errorf("%v: code = %v, want 20", argv, code)
+		}
+		if errOut != "" {
+			t.Errorf("%v: stderr must stay clean in json mode, got %q", argv, errOut)
+		}
+		var doc map[string]interface{}
+		if err := json.Unmarshal([]byte(out), &doc); err != nil {
+			t.Errorf("%v: stdout is not a JSON document: %v (%q)", argv, err, out)
+			continue
+		}
+		if doc["exit"] != float64(20) || doc["class"] != "config" {
+			t.Errorf("%v: doc = %+v", argv, doc)
+		}
+	}
+
+	// A bad --output value has no valid shape to honour, so it reports in human form.
+	code, _, errOut := run(t, table, "--output", "banana", "--nonesuch", "probe")
+	if code != exitcode.Config || errOut == "" {
+		t.Errorf("code=%v stderr=%q; a bad --output must still say something", code, errOut)
+	}
+
+	// The pre-scan must stop at the command name: a subcommand's own --output is the subcommand's
+	// business, and must not silently reshape a global parse error.
+	if m, err := preScanOutputMode([]string{"probe", "--output", "json"}); err != nil || m != OutputHuman {
+		t.Errorf("preScan leaked past the command name: %v, %v", m, err)
+	}
+}

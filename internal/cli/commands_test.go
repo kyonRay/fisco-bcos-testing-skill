@@ -90,7 +90,7 @@ func TestConfigShowWiresAllFiveLayers(t *testing.T) {
 		got[m["key"].(string)] = [2]string{m["value"].(string), m["source"].(string)}
 	}
 	for key, want := range map[string][2]string{
-		"fuzz.seed":                     {"42", "default"},   // built-in default layer
+		"fuzz.seed":                     {"42", "default"},     // built-in default layer
 		"genesis.compatibility_version": {"3.16.4", "profile"}, // profile layer
 		"cluster.web3_base_port":        {"8545", "profile"},   // profile's [config_ini_override]
 		"fuzz.batch":                    {"200", "fbt.yaml"},   // file layer

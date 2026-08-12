@@ -105,17 +105,25 @@ func dispatch(table map[string]Command, argv []string, stdout, stderr io.Writer)
 	g := &globalFlags{opts: &opts, output: "human", ai: "off"}
 	g.bind(fs)
 
+	// The requested shape has to be known BEFORE parsing can fail, or `fbt --output json
+	// --nonesuch` answers a machine consumer with prose on stderr -- the one thing --output json
+	// exists to eliminate. A bad --output value is reported in human shape, because at that point
+	// no valid shape was requested.
+	mode, modeErr := preScanOutputMode(argv)
+
 	if err := fs.Parse(argv); err != nil {
 		if err == flag.ErrHelp {
 			// --help is a request, not a failure: usage on stdout, exit 0.
 			writeUsage(stdout, table)
 			return exitcode.OK
 		}
-		// The output mode is not trusted yet, so this one message goes out in human shape.
-		return emitError(stdout, stderr, OutputHuman, fbterr.Configf("%v", err))
+		return emitError(stdout, stderr, mode, fbterr.Configf("%v", err))
+	}
+	if modeErr != nil {
+		return emitError(stdout, stderr, OutputHuman, modeErr)
 	}
 	if err := g.finish(); err != nil {
-		return emitError(stdout, stderr, OutputHuman, err)
+		return emitError(stdout, stderr, mode, err)
 	}
 
 	if g.showVersion {
@@ -143,6 +151,30 @@ func dispatch(table map[string]Command, argv []string, stdout, stderr io.Writer)
 				args[0], strings.Join(names(table), ", ")))
 	}
 	return cmd(opts, args[1:], stdout, stderr)
+}
+
+// preScanOutputMode finds --output in a raw argv before the flag package has had a chance to
+// reject anything. It accepts both spellings the flag package does (`--output json` and
+// `--output=json`, with one or two dashes) and stops at the command name, so a subcommand's own
+// arguments cannot change the shape of a global parse error.
+func preScanOutputMode(argv []string) (OutputMode, error) {
+	for i := 0; i < len(argv); i++ {
+		a := argv[i]
+		if !strings.HasPrefix(a, "-") {
+			break // the command name: global flags are over
+		}
+		name := strings.TrimLeft(a, "-")
+		if eq := strings.IndexByte(name, '='); eq >= 0 {
+			if name[:eq] == "output" {
+				return ParseOutputMode(name[eq+1:])
+			}
+			continue
+		}
+		if name == "output" && i+1 < len(argv) {
+			return ParseOutputMode(argv[i+1])
+		}
+	}
+	return OutputHuman, nil
 }
 
 func names(table map[string]Command) []string {

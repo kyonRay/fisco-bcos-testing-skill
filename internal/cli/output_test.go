@@ -38,20 +38,23 @@ func TestErrorDocumentCarriesClassAndExitCode(t *testing.T) {
 	if code != exitcode.Infra {
 		t.Errorf("code = %v, want 30", code)
 	}
+	// spec §11's exact shape: {"exit":N,"class":"...","reason":"...","evidence_path":"..."}
 	var doc struct {
-		OK    bool `json:"ok"`
-		Error struct {
-			Message string `json:"message"`
-			Class   string `json:"class"`
-		} `json:"error"`
-		ExitCode int `json:"exit_code"`
+		Exit         int    `json:"exit"`
+		Class        string `json:"class"`
+		Reason       string `json:"reason"`
+		EvidencePath string `json:"evidence_path"`
 	}
 	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
 		t.Fatalf("not JSON: %v (%q)", err, out.String())
 	}
-	if doc.OK || doc.ExitCode != 30 || doc.Error.Class != "infra" ||
-		!strings.Contains(doc.Error.Message, "cluster unreachable") {
+	if doc.Exit != 30 || doc.Class != "infra" || !strings.Contains(doc.Reason, "cluster unreachable") {
 		t.Errorf("doc = %+v", doc)
+	}
+	// evidence_path is omitted until a run produces evidence; an empty string would look like a
+	// path that exists and is blank.
+	if strings.Contains(out.String(), "evidence_path") {
+		t.Errorf("evidence_path must be omitted when there is none: %q", out.String())
 	}
 }
 

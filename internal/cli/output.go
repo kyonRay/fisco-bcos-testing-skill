@@ -42,15 +42,18 @@ func ParseOutputMode(s string) (OutputMode, error) {
 	return OutputHuman, fbterr.Configf("--output must be human, json or jsonl, got %q", s)
 }
 
-type errorPayload struct {
-	Message string `json:"message"`
-	Class   string `json:"class"`
-}
-
+// errorDoc is spec §11's top-level failure object, field for field:
+//
+//	{"exit":30,"class":"infra","reason":"...","evidence_path":"..."}
+//
+// The shape is the spec's, not a convenience of this package: the spec tells UI and CI authors to
+// build against it, and a second spelling here would mean everything downstream has to handle two.
+// EvidencePath is omitted until there is one -- run-time failures gain it when the workspace lands.
 type errorDoc struct {
-	OK       bool         `json:"ok"`
-	Error    errorPayload `json:"error"`
-	ExitCode int          `json:"exit_code"`
+	Exit         int    `json:"exit"`
+	Class        string `json:"class"`
+	Reason       string `json:"reason"`
+	EvidencePath string `json:"evidence_path,omitempty"`
 }
 
 // emitError writes a failure in the requested shape and returns the code to exit with. EVERY
@@ -70,8 +73,7 @@ func emitError(stdout, stderr io.Writer, mode OutputMode, err error) exitcode.Co
 		// user's misconfiguration (20).
 		class = fbterr.ClassHost
 	}
-	doc := errorDoc{Error: errorPayload{Message: err.Error(), Class: class.String()},
-		ExitCode: code.Int()}
+	doc := errorDoc{Exit: code.Int(), Class: class.String(), Reason: err.Error()}
 
 	switch mode {
 	case OutputJSON, OutputJSONL:

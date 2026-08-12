@@ -194,29 +194,59 @@ func wait(ctx context.Context, cmd *exec.Cmd, s Spec) Result {
 	return res
 }
 
-// terminateGroup sends TERM to the whole group, then KILL if it is still alive after the grace
-// period, and returns the engine's final wait status. The NEGATIVE pid is what makes it a group
-// signal rather than a signal to bash alone.
+// groupPollInterval is how often the group is re-checked for survivors after the leader is gone.
+const groupPollInterval = 50 * time.Millisecond
+
+// terminateGroup sends TERM to the whole group and does not return until the group is empty or the
+// grace period has ended in KILL. It returns the engine's wait status.
+//
+// The leader exiting is NOT the end of it. A member that ignores TERM -- a JVM with its own
+// shutdown handling, a node process mid-write -- keeps running after bash is reaped, and returning
+// at that moment leaves it behind holding ports and writing to the cluster directory. So the grace
+// period is measured from the TERM, spans the leader's death, and ends in KILL for the whole group
+// if anything is still there.
 func terminateGroup(cmd *exec.Cmd, grace time.Duration, exited <-chan error) error {
 	if grace <= 0 {
 		grace = DefaultKillGrace
 	}
 	pgid, err := syscall.Getpgid(cmd.Process.Pid)
 	if err != nil {
-		// Already reaped, or it never got its own group; fall back to signalling the child.
+		// Already reaped, or it never got its own group; fall back to the child's own pid, which
+		// is the group id Setpgid would have given it.
 		pgid = cmd.Process.Pid
 	}
-	_ = syscall.Kill(-pgid, syscall.SIGTERM)
-
-	timer := time.NewTimer(grace)
-	defer timer.Stop()
-	select {
-	case werr := <-exited:
-		return werr
-	case <-timer.C:
-		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	if own, ownErr := syscall.Getpgid(os.Getpid()); ownErr == nil && own == pgid {
+		// Setpgid must have failed. Signalling this group would take the host down with it, so
+		// signal only the child and let the caller's own deadline handle the rest.
+		_ = cmd.Process.Signal(syscall.SIGKILL)
 		return <-exited
 	}
+
+	deadline := time.Now().Add(grace)
+	_ = syscall.Kill(-pgid, syscall.SIGTERM)
+
+	// Phase 1: the leader, bounded by the same grace period.
+	var werr error
+	timer := time.NewTimer(grace)
+	select {
+	case werr = <-exited:
+		timer.Stop()
+	case <-timer.C:
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		werr = <-exited
+	}
+
+	// Phase 2: the rest of the group. kill(-pgid, 0) fails once no member is left.
+	for time.Now().Before(deadline) {
+		if syscall.Kill(-pgid, 0) != nil {
+			return werr
+		}
+		time.Sleep(groupPollInterval)
+	}
+	if syscall.Kill(-pgid, 0) == nil {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	}
+	return werr
 }
 
 func fillStatus(res *Result, err error) {
@@ -259,6 +289,9 @@ func buildEnv(config map[string]string) ([]string, error) {
 	for _, name := range keys.MustStrip() {
 		drop[name] = true
 	}
+	for _, name := range interpreterControls {
+		drop[name] = true
+	}
 	// Config wins over anything inherited with the same name.
 	for _, kv := range assignments {
 		drop[nameOf(kv)] = true
@@ -266,11 +299,39 @@ func buildEnv(config map[string]string) ([]string, error) {
 
 	out := make([]string, 0, len(os.Environ())+len(assignments))
 	for _, kv := range os.Environ() {
-		if !drop[nameOf(kv)] {
-			out = append(out, kv)
+		name := nameOf(kv)
+		if drop[name] || isExportedFunction(name) {
+			continue
 		}
+		out = append(out, kv)
 	}
 	return append(out, assignments...), nil
+}
+
+// interpreterControls change what bash executes BEFORE or INSTEAD OF the script it was handed.
+// They are not configuration -- no config key may ever bind to them -- so they live here rather
+// than in the key registry, which describes settings a user is allowed to express.
+//
+// The one that makes this non-optional is BASH_ENV: non-interactive bash sources the file it names
+// before running the script. A hook left there can `exit 0`, and then the engine script's body
+// never runs while the run still reports success -- the same false green SCENARIO_DRY=1 produces,
+// through a door the strip list does not cover. Verified by hand: with BASH_ENV set to a file
+// containing `exit 0`, the script's own output never appears and the exit code is 0.
+var interpreterControls = []string{
+	"BASH_ENV",  // sourced before a non-interactive script
+	"ENV",       // the same thing in POSIX mode
+	"SHELLOPTS", // forces set -o options on, changing what the script's own set lines mean
+	"BASHOPTS",  // the same for shopt
+	"CDPATH",    // silently redirects every relative cd
+	"IFS",       // changes how every unquoted expansion is split
+	"GLOBIGNORE",
+}
+
+// isExportedFunction matches bash's exported-function encoding (BASH_FUNC_name%%). An entry there
+// replaces a function the engine script calls, which substitutes behaviour just as thoroughly as
+// substituting the script itself.
+func isExportedFunction(name string) bool {
+	return strings.HasPrefix(name, "BASH_FUNC_")
 }
 
 func nameOf(assignment string) string {
