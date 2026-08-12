@@ -72,11 +72,19 @@ func TestCreateMakesTheWholeLayout(t *testing.T) {
 	if w.Root != filepath.Join(state, "runs", "run-1") {
 		t.Errorf("Root = %s", w.Root)
 	}
-	for _, d := range []string{w.Root, w.Cluster, w.Evidence} {
+	for _, d := range []string{w.Root, w.Evidence} {
 		st, err := os.Stat(d)
 		if err != nil || !st.IsDir() {
 			t.Errorf("%s is not a directory: %v", d, err)
 		}
+	}
+	// Cluster must NOT exist. It is handed to cluster_up.sh as build_chain's -o, and build_chain
+	// refuses an existing directory outright:
+	//   [FATAL] <dir> DIR already exist, please check!
+	// Pre-creating it made every real chain bring-up fail before it started -- caught only by
+	// running against a real FISCO build, since a fake engine happily accepts any path.
+	if _, err := os.Stat(w.Cluster); !os.IsNotExist(err) {
+		t.Errorf("cluster directory exists after Create; build_chain will refuse it: %v", err)
 	}
 	// failures.jsonl is NOT pre-created: failures_lib.sh appends to it, and an existing empty file
 	// would make "no defects were recorded" and "the sink was never written" look the same.

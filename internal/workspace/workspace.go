@@ -85,10 +85,16 @@ func Create(stateDir, runID string) (Workspace, error) {
 		}
 		return w, fbterr.Infraf("cannot create workspace %s: %v", w.Root, err)
 	}
-	for _, d := range []string{w.Cluster, w.Evidence} {
-		if err := os.Mkdir(d, 0o755); err != nil {
-			return w, fbterr.Infraf("cannot create %s: %v", d, err)
-		}
+	// Evidence only. Cluster is deliberately left absent: it is what the host passes to
+	// cluster_up.sh as build_chain's -o, and build_chain refuses to write into a directory that
+	// already exists ("[FATAL] <dir> DIR already exist, please check!"). Creating it here as a
+	// courtesy made every real bring-up fail at step 1.
+	//
+	// Nothing needs it earlier. build_chain creates it, fuzz_bcos.sh mkdir -p's its own outdir,
+	// and failures_append mkdir -p's before its first write -- and no failure row can be produced
+	// before the cluster exists, because the oracles only run once a chain is up.
+	if err := os.Mkdir(w.Evidence, 0o755); err != nil {
+		return w, fbterr.Infraf("cannot create %s: %v", w.Evidence, err)
 	}
 	return w, nil
 }
