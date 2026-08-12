@@ -32,11 +32,15 @@ type Paths struct {
 	ConfigExplicit bool
 	InstallRoot    string
 	Scripts        string
-	EngineJSON     string
-	Profiles       string
-	ShippedCases   string
-	StateCases     string
-	Clusters       string
+	// Tools is where install.sh puts tamper-helper.sh and the jar it runs. It exists as a field
+	// because tools.tamper_helper otherwise has to be configured by hand on every machine, naming
+	// a file the installer just placed at a location it alone decides.
+	Tools        string
+	EngineJSON   string
+	Profiles     string
+	ShippedCases string
+	StateCases   string
+	Clusters     string
 }
 
 // defaultInstallRoot derives the root from the running binary: <root>/bin/fbt means two levels up,
@@ -101,6 +105,7 @@ func Resolve(o Overrides, e Env, cwd string) (Paths, error) {
 		p.InstallRoot = defaultInstallRoot()
 	}
 	p.Scripts = filepath.Join(p.InstallRoot, "libexec", "fbt", "scripts")
+	p.Tools = filepath.Join(p.InstallRoot, "libexec", "fbt", "tools")
 	p.EngineJSON = filepath.Join(p.InstallRoot, "libexec", "fbt", "engine.json")
 	p.Profiles = filepath.Join(p.InstallRoot, "share", "fbt", "profiles")
 	p.ShippedCases = filepath.Join(p.InstallRoot, "share", "fbt", "cases")

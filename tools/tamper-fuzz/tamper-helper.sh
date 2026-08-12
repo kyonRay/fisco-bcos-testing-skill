@@ -10,9 +10,18 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# On the remote gate host the shipped jar sits next to this script, not under build/libs/ (that's
-# only the local dev-build layout) — TAMPER_FUZZ_JAR lets the caller point at it explicitly.
-JAR="${TAMPER_FUZZ_JAR:-$SCRIPT_DIR/build/libs/tamper-fuzz-all.jar}"
+# Beside this script first: that IS the installed layout (install.sh puts both in
+# libexec/fbt/tools/). build/libs/ is the local gradle dev tree, and TAMPER_FUZZ_JAR overrides both.
+# Probing only build/libs/ left an installed engine with no jar at all, and the malformed scenario
+# then failed as though the CHAIN had misbehaved rather than the machine being incomplete.
+JAR="${TAMPER_FUZZ_JAR:-}"
+if [[ -z "$JAR" ]]; then
+    if [[ -f "$SCRIPT_DIR/tamper-fuzz-all.jar" ]]; then
+        JAR="$SCRIPT_DIR/tamper-fuzz-all.jar"
+    else
+        JAR="$SCRIPT_DIR/build/libs/tamper-fuzz-all.jar"
+    fi
+fi
 
 # Respect an explicit caller override; otherwise probe the live chain. On any failure (offline,
 # RPC down, unparseable response) leave TAMPER_BLOCK_LIMIT unset so TamperFuzz falls back to its

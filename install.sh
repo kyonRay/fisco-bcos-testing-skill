@@ -27,12 +27,16 @@
 #      only discovered when a run tries to build a chain.
 #
 # Usage:
-#   ./install.sh [--prefix DIR] [--sibling DIR] [--no-sibling]
+#   ./install.sh [--prefix DIR] [--sibling DIR] [--no-sibling] [--binary PATH]
 #
 #   --prefix DIR    where to install (default: ./dist)
 #   --sibling DIR   the fisco-bcos-testing skill checkout to copy engine scripts from
 #                   (default: ../fisco-bcos-testing)
 #   --no-sibling    skip the sibling copy; `fbt doctor` will report what is missing
+#   --binary PATH   install this prebuilt fbt instead of compiling one. The machines that run a
+#                   gate round are test runners with a FISCO build on them, not Go workstations --
+#                   requiring a toolchain there would mean installing Go on every one. Cross-build
+#                   with `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build ./cmd/fbt` and pass it.
 set -euo pipefail
 
 if (( BASH_VERSINFO[0] < 4 )); then
@@ -44,30 +48,45 @@ SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFIX="$SRC/dist"
 SIBLING="$SRC/../fisco-bcos-testing"
 WANT_SIBLING=1
+PREBUILT=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --prefix) PREFIX="$2"; shift 2 ;;
         --sibling) SIBLING="$2"; shift 2 ;;
         --no-sibling) WANT_SIBLING=0; shift ;;
+        --binary) PREBUILT="$2"; shift 2 ;;
         -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown flag $1; -h for help" >&2; exit 2 ;;
     esac
 done
 
-command -v go >/dev/null || { echo "ERROR: go is not on PATH" >&2; exit 1; }
+if [[ -n "$PREBUILT" ]]; then
+    [[ -f "$PREBUILT" ]] || { echo "ERROR: --binary $PREBUILT does not exist" >&2; exit 1; }
+else
+    command -v go >/dev/null || {
+        echo "ERROR: go is not on PATH. Cross-build elsewhere and pass --binary PATH." >&2
+        exit 1
+    }
+fi
 
 mkdir -p "$PREFIX"
 PREFIX="$(cd "$PREFIX" && pwd)"
 LIBEXEC="$PREFIX/libexec/fbt"
 SHARE="$PREFIX/share/fbt"
 
-echo ">> building fbt"
 mkdir -p "$PREFIX/bin"
-# CGO_ENABLED=0 so the binary carries no dynamic libc dependency and a tree built on one machine
-# runs on another. The build runs in a SUBSHELL rather than with `go build -C`, which needs Go
-# 1.20 while this module targets 1.19 -- and the failure is a bare "flag provided but not defined".
-( cd "$SRC" && CGO_ENABLED=0 go build -o "$PREFIX/bin/fbt" ./cmd/fbt )
+if [[ -n "$PREBUILT" ]]; then
+    echo ">> installing prebuilt fbt from $PREBUILT"
+    cp "$PREBUILT" "$PREFIX/bin/fbt"
+    chmod 755 "$PREFIX/bin/fbt"
+else
+    echo ">> building fbt"
+    # CGO_ENABLED=0 so the binary carries no dynamic libc dependency and a tree built on one machine
+    # runs on another. The build runs in a SUBSHELL rather than with `go build -C`, which needs Go
+    # 1.20 while this module targets 1.19 -- and the failure is a bare "flag provided but not defined".
+    ( cd "$SRC" && CGO_ENABLED=0 go build -o "$PREFIX/bin/fbt" ./cmd/fbt )
+fi
 
 echo ">> laying out $PREFIX"
 rm -rf "$LIBEXEC" "$SHARE"
@@ -77,6 +96,16 @@ cp "$SRC/engine.json" "$LIBEXEC/engine.json"
 cp "$SRC"/scripts/*.sh "$LIBEXEC/scripts/"
 cp "$SRC"/scripts/scenarios/*.sh "$LIBEXEC/scripts/scenarios/"   # see note 2 in the header
 cp "$SRC"/tools/tamper-fuzz/tamper-helper.sh "$LIBEXEC/tools/"
+# The helper is a wrapper around a jar. Shipping the wrapper alone left the malformed scenario
+# unable to run at all, and it failed mid-round as though the CHAIN were at fault. The jar is a
+# gradle artifact rather than a checked-in file, so it may legitimately be absent -- say which.
+TAMPER_JAR="$SRC/tools/tamper-fuzz/build/libs/tamper-fuzz-all.jar"
+if [[ -f "$TAMPER_JAR" ]]; then
+    cp "$TAMPER_JAR" "$LIBEXEC/tools/tamper-fuzz-all.jar"
+else
+    echo "WARNING: tamper-fuzz-all.jar is not built; the 'malformed' scenario will be unavailable." >&2
+    echo "         Build it with: (cd $SRC/tools/tamper-fuzz && ./gradlew shadowJar)" >&2
+fi
 cp "$SRC"/profiles/*.profile "$SHARE/profiles/"
 # .case files only: the directory also holds README.md and .gitkeep, and a registry enumeration
 # that tripped over those would refuse to run at all.

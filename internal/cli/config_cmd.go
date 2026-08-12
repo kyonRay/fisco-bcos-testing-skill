@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -67,8 +68,13 @@ func resolveAll(o GlobalOptions, profileSpec, cwd string, env map[string]string)
 	// The flag layer carries the paths the host itself resolved. They are not user opinions: they
 	// are where the engine actually lives for this invocation, so they must outrank a stale
 	// engine.scripts_dir left in someone's fbt.yaml.
+	// The engine ships tamper-helper.sh at one known place; defaulting to it means a correct
+	// install is not reported as an unconfigured one. It goes in the DEFAULTS layer, not the flags
+	// layer -- somebody pointing at their own build must still win.
+	defaults := config.Defaults()
+	defaults["tools.tamper_helper"] = filepath.Join(p.Tools, "tamper-helper.sh")
 	resolved, err := config.Merge(config.Inputs{
-		Defaults: config.Defaults(),
+		Defaults: defaults,
 		Profile:  prof,
 		File:     file,
 		Env:      keys.FromLegacyEnv(env),
