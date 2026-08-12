@@ -107,7 +107,10 @@ var table = []Row{
 	{Key: "fuzz.profile_name", Env: []string{"RG_FUZZ_PROFILE_NAME"}, Type: KindString},
 	{Key: "fuzz.profile_path", Env: []string{"RG_FUZZ_PROFILE"}, Type: KindPath},
 	{Key: "fuzz.restart_cmd", Env: []string{"RG_FUZZ_RESTART_CMD"}, Type: KindString},
-	{Key: "fuzz.sec", Env: []string{"RG_FUZZ_SEC"}, Type: KindInt, Min: intp(1)},
+	// Min 0, not 1: fuzz_bcos.sh:72-73 documents 0 as "no wall-clock budget, use RG_FUZZ_ITERS
+	// instead", and 0 is the script's own default. A floor of 1 would reject the engine's default
+	// and leave the iteration-budget mode inexpressible from configuration.
+	{Key: "fuzz.sec", Env: []string{"RG_FUZZ_SEC"}, Type: KindInt, Min: intp(0)},
 	{Key: "fuzz.seed", Env: []string{"RG_FUZZ_SEED"}, Type: KindInt},
 	{Key: "fuzz.strategy", Env: []string{"RG_FUZZ_STRATEGY"}, Type: KindEnum, Enum: []string{"struct", "bytes", "both"}},
 	{Key: "fuzz.transport", Env: []string{"RG_FUZZ_TRANSPORT"}, Type: KindEnum, Enum: []string{"bcos", "web3", "web3method"}},

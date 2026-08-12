@@ -223,3 +223,19 @@ func TestSpecMandatedKeysExist(t *testing.T) {
 		}
 	}
 }
+
+// A range that rejects the engine's own default makes a working mode unreachable from
+// configuration. fuzz.sec=0 is fuzz_bcos.sh:72-73's documented "use the iteration budget instead".
+func TestRangesAcceptTheEnginesOwnDefaults(t *testing.T) {
+	for _, c := range []struct{ key, val string }{
+		{"fuzz.sec", "0"},
+		{"fuzz.continue", "0"},
+		{"oracle.once_wait_sec", "0"},
+		{"fuzz.seed", "42"},
+		{"tools.tamper_block_limit", "0"},
+	} {
+		if err := Validate(c.key, c.val); err != nil {
+			t.Errorf("Validate(%s, %q): %v", c.key, c.val, err)
+		}
+	}
+}
