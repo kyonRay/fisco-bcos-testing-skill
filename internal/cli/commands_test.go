@@ -46,7 +46,7 @@ func decode(t *testing.T, s string) map[string]interface{} {
 func TestRealTableRegistersOnlyImplementedCommands(t *testing.T) {
 	want := map[string]bool{
 		"config": true, "profile": true, "doctor": true, "plan": true,
-		"case": true, "cluster": true, "gate": true,
+		"case": true, "cluster": true, "gate": true, "fuzz": true, "upgrade": true,
 	}
 	for name := range commands {
 		if !want[name] {
