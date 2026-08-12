@@ -50,6 +50,21 @@ func gateFixture(t *testing.T, gateBody, caseBody string) (testinstall.Install, 
 			t.Fatal(err)
 		}
 	}
+	// A real, resolvable viem -- the probe runs node from the repo root and asks it to import the
+	// package, so a stub module exercises the actual resolution instead of mocking past it.
+	vm := filepath.Join(ti.Root, "repo", "node_modules", "viem")
+	if err := os.MkdirAll(vm, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"package.json": `{"name":"viem","version":"0.0.0","type":"module","exports":"./index.js"}`,
+		"index.js":     "export const stub = true\n",
+	} {
+		if err := os.WriteFile(filepath.Join(vm, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	java := "/usr/bin/java"
 	if _, err := os.Stat(java); err != nil {
 		java = filepath.Join(ti.Root, "repo/fisco-bcos") // any existing file: the check is existence

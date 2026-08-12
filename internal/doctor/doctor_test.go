@@ -11,20 +11,24 @@ import (
 // fakeProbe makes every dependency's presence an input, so the matrix can be tested without
 // installing java, node or a FISCO checkout.
 type fakeProbe struct {
-	path  map[string]bool
-	files map[string]bool
-	bash  int
+	path    map[string]bool
+	files   map[string]bool
+	bash    int
+	modules map[string]bool
 }
 
 func (f fakeProbe) LookPath(exe string) bool { return f.path[exe] }
 func (f fakeProbe) Exists(p string) bool     { return f.files[p] }
 func (f fakeProbe) BashMajor() int           { return f.bash }
 
+func (f fakeProbe) NodeModule(_, name string) bool { return f.modules[name] }
+
 func everything() fakeProbe {
 	return fakeProbe{
-		path:  map[string]bool{"curl": true, "pgrep": true, "node": true},
-		files: map[string]bool{},
-		bash:  5,
+		path:    map[string]bool{"curl": true, "pgrep": true, "node": true},
+		files:   map[string]bool{},
+		bash:    5,
+		modules: map[string]bool{"viem": true},
 	}
 }
 
@@ -320,5 +324,27 @@ func TestABareCommandNameIsLookedUpOnPathNotUnderTheRepo(t *testing.T) {
 	p.files["/opt/jdk/bin/java"] = true
 	if _, err := CheckIn("/repo", plan, map[string]string{"tools.java_bin": "/opt/jdk/bin/java"}, p); err != nil {
 		t.Errorf("an explicit path was not honoured: %v", err)
+	}
+}
+
+// A missing npm package is the machine's problem, not the chain's. Before this was checked, viem's
+// absence surfaced four minutes into a run as a dual_rpc scenario FAILURE -- exit 10, "the chain
+// failed the gate" -- for a release candidate whose web3 leg had never executed.
+func TestAMissingNodeModuleIsInfraNotAGateFailure(t *testing.T) {
+	plan, err := Plan("gate", []string{"dual_rpc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, p := fullConfig(everything())
+	p.modules = map[string]bool{} // node is installed; viem is not
+	_, err = CheckIn("/repo", plan, cfg, p)
+	if err == nil {
+		t.Fatal("a machine with no viem passed the dual_rpc preflight")
+	}
+	if c, _ := fbterr.ClassOf(err); c != fbterr.ClassInfra {
+		t.Errorf("class = %v, want infra (exit 30)", c)
+	}
+	if !strings.Contains(err.Error(), "viem") {
+		t.Errorf("err = %v, want it to name the package", err)
 	}
 }

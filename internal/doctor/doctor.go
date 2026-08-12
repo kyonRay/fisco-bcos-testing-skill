@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/kyonRay/fisco-bcos-testing-skill/internal/fbterr"
@@ -28,6 +29,11 @@ const (
 	// KindValue: a config key that must merely be non-empty, e.g. tools.web3_private_key. Only
 	// ever 20; there is nothing on disk to check.
 	KindValue
+	// KindNodeModule: an npm package the engine imports at run time. Resolution walks node_modules
+	// upward from the WORKING DIRECTORY, so it is probed from the same directory the engine runs
+	// in -- checking from anywhere else answers a different question than the one that matters.
+	// Absence is infrastructure: there is no config key that installs a package.
+	KindNodeModule
 	// KindBashVersion: bash 4+, checked by asking the interpreter itself. Stock macOS ships 3.2
 	// and every script in the engine fails on it with an obscure parse error, so this is checked
 	// up front rather than discovered as a syntax error mid-round.
@@ -42,6 +48,8 @@ type Requirement struct {
 	ConfigKey string
 	// Exe is the program name for KindExecutable.
 	Exe string
+	// Module is the package name for KindNodeModule.
+	Module string
 	// Scenarios narrows a gate requirement to the scenario families that actually need it. Empty
 	// means every gate round needs it. This is what makes `--scenarios malformed` stop demanding
 	// Node and Viem -- checking dependencies of work that was not selected is how a tool refuses
@@ -73,8 +81,14 @@ var matrix = map[string][]Requirement{
 			Scenarios: []string{"dual_rpc", "jsd"},
 			Why:       "the web3 RPC path signs its own transactions"},
 		{Name: "node-runtime", Kind: KindExecutable, Exe: "node",
-			Scenarios: []string{"jsd"},
-			Why:       "the JSD scenario drives the chain through Viem"},
+			Scenarios: []string{"dual_rpc", "jsd"},
+			Why:       "the web3 leg derives its address and signs its transactions through Viem"},
+		// Viem's absence used to surface as a dual_rpc FAILURE -- exit 10, "the chain failed the
+		// gate" -- for a release candidate that was never tested. A missing npm package is the
+		// machine's problem, and it has to be said before a chain is built, not after.
+		{Name: "viem", Kind: KindNodeModule, Module: "viem",
+			Scenarios: []string{"dual_rpc", "jsd"},
+			Why:       "the web3 leg builds and signs its transactions with it"},
 		{Name: "jsd", Kind: KindPath, ConfigKey: "jsd.dir",
 			Scenarios: []string{"jsd"},
 			Why:       "the JSD driver's own directory"},
@@ -165,6 +179,8 @@ type Report struct {
 // Probe abstracts the filesystem and PATH so the matrix can be tested without installing anything.
 type Probe interface {
 	LookPath(exe string) bool
+	// NodeModule reports whether name is importable with dir as the working directory.
+	NodeModule(dir, name string) bool
 	Exists(path string) bool
 	BashMajor() int
 }
@@ -173,6 +189,15 @@ type OSProbe struct{}
 
 func (OSProbe) LookPath(exe string) bool { _, err := exec.LookPath(exe); return err == nil }
 func (OSProbe) Exists(path string) bool  { _, err := os.Stat(path); return err == nil }
+
+// NodeModule asks node itself, from dir, rather than guessing at node_modules layouts: the engine
+// resolves the package exactly this way, and viem is ESM-only so a require() probe would report it
+// missing on a machine that has it.
+func (OSProbe) NodeModule(dir, name string) bool {
+	cmd := exec.Command("node", "--input-type=module", "-e", "import "+strconv.Quote(name))
+	cmd.Dir = dir
+	return cmd.Run() == nil
+}
 
 // BashMajor asks the bash on PATH for its own major version.
 //
@@ -247,6 +272,14 @@ func CheckIn(base string, plan []Requirement, config map[string]string, p Probe)
 			f.Present = p.LookPath(r.Exe)
 			if !f.Present {
 				f.Class, f.Detail = "infra", r.Exe+" is not on PATH: "+r.Why
+				missingInfra = append(missingInfra, f.Detail)
+			}
+		case KindNodeModule:
+			f.Present = p.NodeModule(base, r.Module)
+			if !f.Present {
+				f.Class = "infra"
+				f.Detail = "the node package " + r.Module + " cannot be imported from " + base +
+					" (npm i " + r.Module + "): " + r.Why
 				missingInfra = append(missingInfra, f.Detail)
 			}
 		case KindBashVersion:
