@@ -123,7 +123,7 @@ func gateRun(ctx context.Context, o GlobalOptions, args []string, stdout, stderr
 		return emitError(stdout, stderr, o.Output, err)
 	}
 	if err := rt.begin(map[string]interface{}{"profile": g.profile}); err != nil {
-		return emitError(stdout, stderr, o.Output, err)
+		return rt.fail(stdout, stderr, o.Output, err)
 	}
 	if _, err := rt.Registry.Reserve(clusters.Entry{
 		RunID:     rt.Norm.RunID,
@@ -131,7 +131,7 @@ func gateRun(ctx context.Context, o GlobalOptions, args []string, stdout, stderr
 		Profile:   g.profile,
 		Ports:     ports,
 	}, g.parallel); err != nil {
-		return emitError(stdout, stderr, o.Output, err)
+		return rt.fail(stdout, stderr, o.Output, err)
 	}
 	// The reservation is released here rather than by gate.sh: the engine tears the cluster down,
 	// but only the host knows the run id the entry is filed under.
@@ -183,7 +183,7 @@ func gateRun(ctx context.Context, o GlobalOptions, args []string, stdout, stderr
 	if err := render(stdout, o.Output, doc, func(w io.Writer) {
 		writeGateHuman(w, doc)
 	}); err != nil {
-		return emitError(stdout, stderr, o.Output, err)
+		return rt.fail(stdout, stderr, o.Output, err)
 	}
 	return code
 }

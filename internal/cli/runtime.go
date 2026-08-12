@@ -154,6 +154,12 @@ func (rt *runtime) begin(extra map[string]interface{}) error {
 	return nil
 }
 
+// fail reports an error with this run's workspace attached, when there is one. Commands that have
+// begun a run use it instead of emitError so the failure envelope carries somewhere to look.
+func (rt *runtime) fail(stdout, stderr io.Writer, mode OutputMode, err error) exitcode.Code {
+	return emitErrorAt(stdout, stderr, mode, err, rt.Workspace.Root)
+}
+
 // record collects every event, and in jsonl mode streams it as it happens. A gate round is long,
 // and a consumer that only learns what happened once the process exits cannot show progress.
 func (rt *runtime) record(e events.Event) {

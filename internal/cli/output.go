@@ -48,7 +48,9 @@ func ParseOutputMode(s string) (OutputMode, error) {
 //
 // The shape is the spec's, not a convenience of this package: the spec tells UI and CI authors to
 // build against it, and a second spelling here would mean everything downstream has to handle two.
-// EvidencePath is omitted until there is one -- run-time failures gain it when the workspace lands.
+// EvidencePath names the run's workspace when the failure happened inside one. It is the only
+// field that tells an operator where to look, so a chain-touching command reports it through
+// emitRunError; a static command has no workspace and omits it.
 type errorDoc struct {
 	Exit         int    `json:"exit"`
 	Class        string `json:"class"`
@@ -66,6 +68,13 @@ type errorDoc struct {
 // consumer reading only stdout must not get an empty stream and a nonzero code with no
 // explanation. Human mode keeps diagnostics on stderr.
 func emitError(stdout, stderr io.Writer, mode OutputMode, err error) exitcode.Code {
+	return emitErrorAt(stdout, stderr, mode, err, "")
+}
+
+// emitErrorAt is emitError plus the evidence path. A failure that happened with a workspace open
+// must say where it is: "the gate failed" with no path leaves an operator to guess which of the
+// run directories under the state dir was theirs.
+func emitErrorAt(stdout, stderr io.Writer, mode OutputMode, err error, evidence string) exitcode.Code {
 	code := exitcode.FromError(err)
 	class, ok := fbterr.ClassOf(err)
 	if !ok {
@@ -73,7 +82,7 @@ func emitError(stdout, stderr io.Writer, mode OutputMode, err error) exitcode.Co
 		// user's misconfiguration (20).
 		class = fbterr.ClassHost
 	}
-	doc := errorDoc{Exit: code.Int(), Class: class.String(), Reason: err.Error()}
+	doc := errorDoc{Exit: code.Int(), Class: class.String(), Reason: err.Error(), EvidencePath: evidence}
 
 	switch mode {
 	case OutputJSON, OutputJSONL:
@@ -82,6 +91,9 @@ func emitError(stdout, stderr io.Writer, mode OutputMode, err error) exitcode.Co
 		_ = render(stdout, mode, doc, nil)
 	default:
 		fmt.Fprintf(stderr, "fbt: %v\n", err)
+		if evidence != "" {
+			fmt.Fprintf(stderr, "  evidence: %s\n", evidence)
+		}
 	}
 	return code
 }

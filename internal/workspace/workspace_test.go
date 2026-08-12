@@ -83,6 +83,12 @@ func TestCreateMakesTheWholeLayout(t *testing.T) {
 	if _, err := os.Stat(w.Failures); !os.IsNotExist(err) {
 		t.Errorf("failures.jsonl exists before anything failed: %v", err)
 	}
+	// It must name the path the ENGINE writes: gate.sh sets FAILURES_OUTDIR to the cluster outdir,
+	// so a tidier path beside the cluster would send an operator to a file nothing ever creates.
+	if w.Failures != filepath.Join(w.Cluster, "failures.jsonl") {
+		t.Errorf("Failures = %s, want it inside the cluster directory the engine writes to",
+			w.Failures)
+	}
 }
 
 // Two runs sharing one workspace would interleave their failures.jsonl rows and build two chains

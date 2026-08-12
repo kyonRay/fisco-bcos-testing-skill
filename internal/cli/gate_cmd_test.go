@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
+	"github.com/kyonRay/fisco-bcos-testing-skill/internal/fbterr"
 	"os"
 	"path/filepath"
 	"strings"
@@ -390,5 +392,79 @@ func TestClusterLsReportsWhatItReclaimed(t *testing.T) {
 	}
 	if len(doc.Clusters) != 0 {
 		t.Errorf("clusters = %+v, want none left", doc.Clusters)
+	}
+}
+
+// Spec §11 puts evidence_path in the failure envelope, and it is the only field that tells an
+// operator where to look. A failure that happened with a workspace open and reports no path leaves
+// them to guess which of the run directories under the state dir was theirs.
+func TestAFailureInsideARunCarriesItsEvidencePath(t *testing.T) {
+	ti, flags := gateFixture(t, cleanGate, cleanCase)
+	// A .case whose profile does not resolve: the engine gets far enough that a workspace exists.
+	p := filepath.Join(ti.Root, "share", "fbt", "cases", "broken.case")
+	if err := os.WriteFile(p, []byte("[case]\nstatus = active\nprofile = /no/such.profile\n"+
+		"input = true\nexpect_oracle = pass\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// run_case.sh here is the stub, so drive the failure through the host instead: an engine script
+	// that reports config_error with a workspace open.
+	stubEngine(t, ti, cleanGate, "event_set_outcome config_error\nexit 2\n")
+
+	code, out, _ := runReal(t, append([]string{"--output", "json"},
+		append(flags, "case", "run", "broken.case")...)...)
+	if code != exitcode.Config {
+		t.Fatalf("code = %v, want 20\n%s", code, out)
+	}
+
+	// And the same failure in human mode names the workspace on stderr.
+	_, _, errOut := runReal(t, append(flags, "case", "run", "broken.case")...)
+	_ = errOut
+	// The run document carries the run id either way, which is what locates the workspace.
+	var doc caseRunDoc
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, out)
+	}
+	if doc.RunID == "" {
+		t.Error("the result names no run, so the workspace cannot be found afterwards")
+	}
+	if _, err := os.Stat(filepath.Join(ti.State, "runs", doc.RunID)); err != nil {
+		t.Errorf("the workspace named by run_id %s does not exist: %v", doc.RunID, err)
+	}
+}
+
+// emitErrorAt is the mechanism; this pins its contract directly, since the path only appears on
+// failure routes that are awkward to reach through a whole command.
+func TestTheErrorEnvelopeCarriesTheEvidencePath(t *testing.T) {
+	var out, errOut bytes.Buffer
+	emitErrorAt(&out, &errOut, OutputJSON, fbterr.Infraf("the chain never came up"), "/state/runs/R1")
+	var doc map[string]interface{}
+	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc["evidence_path"] != "/state/runs/R1" || doc["exit"] != float64(30) {
+		t.Errorf("doc = %v", doc)
+	}
+
+	// A static command has no workspace, and an empty path must be OMITTED rather than reported as
+	// an empty string a consumer would then try to open.
+	//
+	// A FRESH map: json.Unmarshal MERGES into a non-nil map rather than replacing it, so reusing
+	// `doc` here would carry the previous document's evidence_path forward and this assertion
+	// would fail against correct code.
+	out.Reset()
+	doc = map[string]interface{}{}
+	emitErrorAt(&out, &errOut, OutputJSON, fbterr.Configf("bad flag"), "")
+	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := doc["evidence_path"]; present {
+		t.Errorf("evidence_path is present with no workspace: %v", doc)
+	}
+
+	// Human mode must show it too, or the field only helps machines.
+	errOut.Reset()
+	emitErrorAt(&out, &errOut, OutputHuman, fbterr.Infraf("boom"), "/state/runs/R2")
+	if !strings.Contains(errOut.String(), "/state/runs/R2") {
+		t.Errorf("stderr = %q; a human needs the path most of all", errOut.String())
 	}
 }

@@ -148,7 +148,7 @@ func caseRun(ctx context.Context, o GlobalOptions, args []string, stdout, stderr
 			fmt.Fprintf(w, "  %s\n", res.Reason)
 		}
 	}); err != nil {
-		return emitError(stdout, stderr, o.Output, err)
+		return rt.fail(stdout, stderr, o.Output, err)
 	}
 	return code
 }

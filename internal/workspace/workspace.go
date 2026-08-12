@@ -23,7 +23,12 @@ type Workspace struct {
 	Root     string // <state>/runs/<run_id>
 	Cluster  string // the engine builds its chain here (passed as -o)
 	Evidence string // node logs, tampered payloads, anything a human needs after a trip
-	Failures string // failures.jsonl, the local defect sink failures_lib.sh appends to
+	// Failures is where failures_lib.sh actually appends, which is inside the CLUSTER directory,
+	// not beside it: gate.sh sets FAILURES_OUTDIR to the cluster outdir so a run's defect rows
+	// travel with the node directories they refer to. This field mirrors the engine rather than
+	// declaring a tidier path of its own -- a host that reported an evidence path nothing writes
+	// to would send an operator to an empty file after a real trip.
+	Failures string
 }
 
 // NewRunID returns a fresh identifier: a UTC timestamp for ordering, plus random bytes because a
@@ -107,6 +112,6 @@ func Layout(stateDir, runID string) (Workspace, error) {
 		Root:     root,
 		Cluster:  filepath.Join(root, "cluster"),
 		Evidence: filepath.Join(root, "evidence"),
-		Failures: filepath.Join(root, "failures.jsonl"),
+		Failures: filepath.Join(root, "cluster", "failures.jsonl"),
 	}, nil
 }
