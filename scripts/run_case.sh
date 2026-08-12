@@ -62,14 +62,32 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-DRY_RUN=0
+# fd 3 event protocol (design doc §8). Sourced and armed BEFORE any flag parsing: a usage error
+# that exits two lines from now must still produce a command_finished, or the host sees a
+# subprocess that died without terminating and reports its own bug (40) for what is really a
+# config error (20). Every call is a no-op when fd 3 is not open, so standalone runs are unchanged.
+source "$SCRIPT_DIR/event_lib.sh"
+event_begin_command run_case.sh
 
-# Pull the long --dry-run flag out before getopts sees the rest (getopts only knows short opts).
+DRY_RUN=0
+# Host-provided workspace; see the same note in gate.sh. The old fixed name is the standalone
+# fallback.
+CLUSTER_OUTDIR="./nodes-release-gate-case"
+
+# Pull the long flags out before getopts sees the rest (getopts only knows short opts).
+#
+# -o is pulled out HERE rather than left to getopts, because getopts stops at the first non-option
+# argument and the case path IS one: `run_case.sh some.case -o dir` would silently ignore -o and
+# build the cluster in the default directory. That is the order a person naturally types, and
+# silently using the wrong workspace is worse than any parsing purity.
 args=()
-for arg in "$@"; do
-    case "$arg" in
-        --dry-run) DRY_RUN=1 ;;
-        *) args+=("$arg") ;;
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --dry-run) DRY_RUN=1; shift ;;
+        -o|--outdir)
+            [[ $# -ge 2 ]] || { echo "ERROR: $1 requires a directory. -h for help." >&2; exit 2; }
+            CLUSTER_OUTDIR="$2"; shift 2 ;;
+        *) args+=("$1"); shift ;;
     esac
 done
 set -- "${args[@]+"${args[@]}"}"
@@ -190,6 +208,7 @@ if [[ "$DRY_RUN" == 1 ]]; then
     echo "profile: $CASE_PROFILE"
     echo "input: $CASE_INPUT"
     echo "expect_oracle: $CASE_EXPECT_ORACLE"
+    echo "workspace: $CLUSTER_OUTDIR"
     exit 0
 fi
 
@@ -205,8 +224,6 @@ CASE_PROFILE="$(_run_case_resolve_profile "$CASE_PROFILE" "$(dirname "$CASE_PATH
 
 APPLY_PROFILE="$SCRIPT_DIR/apply_profile.sh"
 [[ -f "$APPLY_PROFILE" ]] || { echo "ERROR: apply_profile.sh not found at $APPLY_PROFILE" >&2; exit 1; }
-
-CLUSTER_OUTDIR="./nodes-release-gate-case"
 
 echo ">> [1/3] apply_profile (needs live chain): bringing up cluster for $CASE_PROFILE"
 bash "$APPLY_PROFILE" -p "$CASE_PROFILE" -o "$CLUSTER_OUTDIR"

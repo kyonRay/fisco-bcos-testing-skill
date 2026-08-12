@@ -68,8 +68,17 @@ func Run(ctx context.Context, s Spec) (Result, error) {
 		// Before any process starts (spec §11): a bad value must not reach bash.
 		return Result{}, err
 	}
-	if st, statErr := os.Stat(s.Script); statErr != nil || st.IsDir() {
+	st, statErr := os.Stat(s.Script)
+	if statErr != nil || st.IsDir() {
 		return Result{}, fbterr.Infraf("engine script %s is missing or not a file", s.Script)
+	}
+	// The exec bit is checked here so a packaging step that dropped it produces a sentence naming
+	// the mode, not a bare "permission denied" from fork/exec. It has happened: the repository
+	// shipped every script at 0644 and nothing noticed, because the bash tests all invoke them as
+	// `bash scripts/x.sh` while the host execs the file.
+	if st.Mode().Perm()&0o111 == 0 {
+		return Result{}, fbterr.Infraf("engine script %s is not executable (mode %04o); "+
+			"the install step must preserve the exec bit", s.Script, st.Mode().Perm())
 	}
 	if st, statErr := os.Stat(s.Dir); statErr != nil || !st.IsDir() {
 		return Result{}, fbterr.Infraf("working directory %s does not exist "+

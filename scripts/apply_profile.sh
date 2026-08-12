@@ -37,6 +37,13 @@ if (( BASH_VERSINFO[0] < 4 )); then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# fd 3 event protocol (design doc §8). Sourced and armed BEFORE any flag parsing: a usage error
+# that exits two lines from now must still produce a command_finished, or the host sees a
+# subprocess that died without terminating and reports its own bug (40) for what is really a
+# config error (20). Every call is a no-op when fd 3 is not open, so standalone runs are unchanged.
+source "$SCRIPT_DIR/event_lib.sh"
+event_begin_command apply_profile.sh
 # _SELF_DIR is the resolver's "own dir" candidate — overridable so tests/relocatable_test.sh can
 # eval just the _resolve_engine_script function body (below) against a fixture dir without
 # sourcing this whole script.

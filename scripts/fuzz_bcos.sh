@@ -903,6 +903,11 @@ _fuzz_run() {
 # or any live-chain IO, matching scripts/oracle_liveness.sh's own execution guard exactly.
 # ---------------------------------------------------------------------------
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    # Inside the execution guard on purpose: at file scope this would arm an EXIT trap on any
+    # shell that merely SOURCES this file for its functions (tests/fuzz_bcos_test.sh does).
+    source "$SCRIPT_DIR/event_lib.sh"
+    event_begin_command fuzz_bcos.sh
+
     OUTDIR="./nodes-release-gate-fuzz"
     DRY_RUN=0
 

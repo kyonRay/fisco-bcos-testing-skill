@@ -56,6 +56,13 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# fd 3 event protocol (design doc §8). Sourced and armed BEFORE any flag parsing: a usage error
+# that exits two lines from now must still produce a command_finished, or the host sees a
+# subprocess that died without terminating and reports its own bug (40) for what is really a
+# config error (20). Every call is a no-op when fd 3 is not open, so standalone runs are unchanged.
+source "$SCRIPT_DIR/event_lib.sh"
+event_begin_command gate.sh
+
 # Declarative list of valid scenario names, used by scenario-selection validation. Exactly the
 # four runnable families — 'upgrade' is excluded on purpose (see _gate_validate_scenarios below):
 # it needs <old_bin> <new_bin> <target_ver>, which this bare-dispatch loop cannot supply, so
@@ -78,6 +85,11 @@ shopt -u nullglob
 PROFILE_PATH=""
 SCENARIOS_RAW=""
 DRY_RUN=0
+# The cluster directory is a host-provided workspace, not a fixed name in the current directory.
+# The engine's cwd stays the repo root (design doc §7.3), so two concurrent runs cannot be isolated
+# by chdir'ing -- only by being told where to build. The old hardcoded default stays as the
+# standalone fallback.
+CLUSTER_OUTDIR="./nodes-release-gate"
 
 # Pull the long flags out before getopts sees the rest (getopts only knows short opts).
 args=()
@@ -95,9 +107,10 @@ while [[ $# -gt 0 ]]; do
 done
 set -- "${args[@]+"${args[@]}"}"
 
-while getopts "p:h" opt; do
+while getopts "p:o:h" opt; do
     case "$opt" in
         p) PROFILE_PATH="$OPTARG" ;;
+        o) CLUSTER_OUTDIR="$OPTARG" ;;
         h) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "bad flag; -h for help" >&2; exit 2 ;;
     esac
@@ -153,6 +166,9 @@ _gate_validate_scenarios "$GATE_KNOWN_SCENARIOS" "${!GATE_SCENARIOS[*]}" "${scen
 if [[ "$DRY_RUN" == 1 ]]; then
     echo "== gate dry-run =="
     echo "profile: $profile_name"
+    # The workspace belongs in the plan: it is where the cluster, the evidence and failures.jsonl
+    # will land, and a reader checking a plan before spending a real bring-up needs to see it.
+    echo "workspace: $CLUSTER_OUTDIR"
     for name in "${scenario_list[@]}"; do
         echo "scenario: $name"
     done
@@ -166,8 +182,6 @@ fi
 
 APPLY_PROFILE="$SCRIPT_DIR/apply_profile.sh"
 [[ -f "$APPLY_PROFILE" ]] || { echo "ERROR: apply_profile.sh not found at $APPLY_PROFILE" >&2; exit 1; }
-
-CLUSTER_OUTDIR="./nodes-release-gate"
 
 echo ">> [1/4] apply_profile (needs live chain): bringing up cluster for $profile_name"
 bash "$APPLY_PROFILE" -p "$PROFILE_PATH" -o "$CLUSTER_OUTDIR"
