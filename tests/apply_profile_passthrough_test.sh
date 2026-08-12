@@ -65,4 +65,18 @@ assert_contains "$argv_joined" " -w 18545 " "spy: real call passed -w (host WEB3
 assert_contains "$argv_joined" " -s " "spy: real call passed -s (sm-gov.profile sm_crypto=true)"
 assert_contains "$argv_joined" " -e $FAKE_BIN " "spy: real call passed -e (host FISCO_BIN)"
 
+# Host-provided p2p/BCOS bases must reach cluster_up's -p, the same way WEB3_BASE reaches -w.
+# These were hardcoded to "30300,20200": the host reserved one port band, the chain bound another,
+# and four nodes died on "Address already in use" after a full build_chain had already run.
+LOGFILE="$WORK/argv2.log"; : > "$LOGFILE"
+set +e
+CLUSTER_UP="$WORK/fake_cluster_up.sh" LOGFILE="$LOGFILE" \
+    P2P_BASE_PORT=31300 BCOS_RPC_BASE_PORT=21200 WEB3_BASE=9545 \
+    bash "$REPO/scripts/apply_profile.sh" -p "$REPO/profiles/sm-gov.profile" -o "$WORK/nodes-out2" \
+    >"$WORK/run2.out" 2>&1
+set -e
+argv2=" $(tr '\n' ' ' < "$LOGFILE")"
+assert_contains "$argv2" " -p 31300,21200 " "spy: host P2P_BASE_PORT/BCOS_RPC_BASE_PORT reach -p"
+assert_contains "$argv2" " -w 9545 " "spy: WEB3_BASE still reaches -w alongside them"
+
 assert_done

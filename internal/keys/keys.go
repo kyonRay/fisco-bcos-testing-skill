@@ -117,7 +117,7 @@ func MustStrip() []string {
 // ones the scripts assign themselves.
 var table = []Row{
 	// ---- cluster ----
-	{Key: "cluster.bcos_base_port", Env: []string{"BCOS_RPC_BASE_PORT"}, Type: KindInt, Min: intp(1), Max: intp(65535), Commands: []string{"cluster", "doctor"}},
+	{Key: "cluster.bcos_base_port", Env: []string{"BCOS_RPC_BASE_PORT"}, Type: KindInt, Min: intp(1), Max: intp(65535), Commands: []string{"cluster", "doctor", "gate"}},
 	{Key: "cluster.bcos_rpc_url", Env: []string{"BCOS_RPC_URL"}, Type: KindString, Commands: []string{"case", "fuzz", "gate"}},
 	{Key: "cluster.contract_name", Env: []string{"BCOS_CONTRACT_NAME"}, Type: KindString, Commands: []string{"gate"}},
 	{Key: "cluster.fund_addresses", Env: []string{"RG_FUND_ADDRESSES"}, Type: KindString, Commands: []string{"cluster"}},
@@ -125,13 +125,16 @@ var table = []Row{
 	{Key: "cluster.group_id", Env: []string{"BCOS_GROUP_ID"}, Type: KindString},
 	{Key: "cluster.node_dir", Env: []string{"NODE_DIR"}, Type: KindPath},
 	{Key: "cluster.root", Env: []string{"RG_CLUSTER_DIR"}, Type: KindPath, Commands: []string{"cluster", "gate"}},
-	{Key: "cluster.web3_base_port", Env: []string{"WEB3_BASE"}, Type: KindInt, Min: intp(1), Max: intp(65535), Commands: []string{"cluster", "doctor"}},
+	{Key: "cluster.web3_base_port", Env: []string{"WEB3_BASE"}, Type: KindInt, Min: intp(1), Max: intp(65535), Commands: []string{"cluster", "doctor", "gate"}},
 	// One key, two names: dual_rpc reads WEB3_RPC_URL, the fuzz driver reads RG_FUZZ_WEB3_URL.
 	// Injecting only one aims the two at different nodes.
 	{Key: "cluster.web3_rpc_url", Env: []string{"WEB3_RPC_URL", "RG_FUZZ_WEB3_URL"}, Type: KindString, Commands: []string{"fuzz", "gate"}},
 	// Host-only: shapes cluster_up's argv rather than the engine's environment (spec §7.7).
 	{Key: "cluster.node_count", Domain: DomainHost, Type: KindInt, Min: intp(1), Commands: []string{"cluster", "gate"}},
-	{Key: "cluster.p2p_base_port", Domain: DomainHost, Type: KindInt, Min: intp(1), Max: intp(65535), Commands: []string{"cluster", "doctor"}},
+	// Not host-only: apply_profile.sh reads P2P_BASE_PORT to build cluster_up's -p argument, so the
+	// gate path (host -> gate.sh -> apply_profile.sh -> cluster_up.sh) needs it in the environment.
+	// Only `fbt cluster up` shapes cluster_up's argv directly.
+	{Key: "cluster.p2p_base_port", Env: []string{"P2P_BASE_PORT"}, Type: KindInt, Min: intp(1), Max: intp(65535), Commands: []string{"cluster", "doctor", "gate"}},
 	{Key: "crypto.sm_mode", Domain: DomainHost, Type: KindBool, Commands: []string{"cluster"}},
 
 	// ---- engine relocation (sub-project 0) ----

@@ -98,7 +98,36 @@ func Merge(in Inputs) (Resolved, error) {
 	if err := apply(out, in.Flags, SourceFlag); err != nil {
 		return nil, err
 	}
+	deriveRPCURLs(out)
 	return out, nil
+}
+
+// deriveRPCURLs makes the two RPC URLs follow their port bases.
+//
+// Moving the ports is not exotic -- it is what any machine that already runs a chain has to do, and
+// build_chain's defaults are the first thing taken. But the URLs are separate keys whose fallbacks
+// are the fixed literals http://127.0.0.1:20200 and :8545, so a run reconfigured onto 21200/9545
+// still aimed its dual_rpc traffic at the default ports. On a machine with an older chain there,
+// that chain ANSWERED: the scenario deployed, called, and reported against the wrong chain.
+//
+// Only a URL nobody stated is derived, and only from a base port somebody did state. An explicit
+// URL means "this node, this host" and outranks the ports it disagrees with.
+func deriveRPCURLs(out Resolved) {
+	for _, d := range []struct{ portKey, urlKey string }{
+		{"cluster.bcos_base_port", "cluster.bcos_rpc_url"},
+		{"cluster.web3_base_port", "cluster.web3_rpc_url"},
+	} {
+		port, ok := out[d.portKey]
+		if !ok || port.From == SourceDefault {
+			continue
+		}
+		if url, ok := out[d.urlKey]; ok && url.From != SourceDefault {
+			continue
+		}
+		// node0. The whole cluster is derived as base+i, and every URL consumer in the engine
+		// talks to one node -- the cross-node oracles do their own per-node discovery.
+		out[d.urlKey] = Value{S: "http://127.0.0.1:" + port.S, From: port.From}
+	}
 }
 
 // apply writes one layer over what is already there. Keys are walked in sorted order so a layer

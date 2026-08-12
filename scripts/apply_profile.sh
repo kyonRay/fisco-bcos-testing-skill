@@ -139,7 +139,12 @@ genesis_compat="${PROFILE_GENESIS[compatibility_version]:-}"
 node_count="${PROFILE_META[node_count]:-4}"
 sm_mode=0
 [[ "${PROFILE_GENESIS[sm_crypto]:-}" == "true" ]] && sm_mode=1
-cu_ports="30300,20200"
+# The p2p and BCOS-RPC bases are host-overridable for the same reason WEB3_BASE is: a second
+# cluster on one machine has to listen somewhere else, and a machine that already runs a chain on
+# build_chain's defaults has none of them free. Hardcoding them made every port setting a no-op --
+# the host reserved 31300/21200, the chain still bound 30300/20200, and the nodes died on "Address
+# already in use" after a full build_chain.
+cu_ports="${P2P_BASE_PORT:-30300},${BCOS_RPC_BASE_PORT:-20200}"
 _apply_profile_cluster_up_args "$OUTDIR" "$genesis_compat" "${FISCO_BIN:-}" "$node_count" "$cu_ports" "${WEB3_BASE:-}" "$sm_mode"
 
 if [[ "$DRY_RUN" == 1 ]]; then
@@ -198,6 +203,9 @@ echo ">> [1/4] cluster_up (needs live chain): build_chain + start_all into $OUTD
 # the "GAP: no compatibility_version passthrough" limitation this comment used to describe here is
 # now closed.
 bash "$CLUSTER_UP" "${APPLY_CU_ARGS[@]}"
+# Absolute from here on: step 4 runs the console from ITS OWN directory (see _console_prepare), and
+# a relative outdir would resolve against the console's location instead of the caller's.
+OUTDIR="$(cd "$OUTDIR" && pwd)"
 NODE_DIR="$OUTDIR/127.0.0.1"
 
 echo ">> [2/4] patching config.ini per profile (needs live chain)"
@@ -331,7 +339,46 @@ _fund_console_account() {
     done
 }
 
+# _console_prepare — resolve the console install, point it at THIS cluster, and make it the working
+# directory for every console call below.
+#
+# Two failures this closes, both found only by running against a real chain:
+#
+#   1. Every console invocation here is `bash console.sh ...`, and the two files
+#      _fund_console_account writes (conf/config.toml, account/ecdsa/) are relative — the script has
+#      always assumed the console's own directory IS the working directory. Nothing ever put it
+#      there. The host launches the engine from the repo root, so step 4 died with
+#      "bash: console.sh: No such file or directory" after a full chain had already been built.
+#      CONSOLE_DIR existed in the key registry and doctor checked it; no code read it.
+#   2. The console is a shared install whose config.toml names whatever chain it was last pointed
+#      at. On the first machine this ran on that was a different, five-day-old cluster on the
+#      default ports — so the profile replay would have landed on THAT chain while the gate went on
+#      to test this one, and every flag would have reported success.
+#
+# This mutates the shared console's config.toml, which is what the existing accountAddress pinning
+# below already does. TLS is out of scope: this console runs disableSsl=true, and a profile that
+# needs SM/SSL certs would have to sync them from the cluster's own sdk/ directory first.
+_console_prepare() {
+    # Same fallback the three scenario families use. They must resolve to the SAME console: the
+    # replay pins an account and repoints the peer list in its config.toml, and a scenario reading a
+    # different install would sign as a different account against a different chain.
+    local dir="${CONSOLE_DIR:-console/dist}"
+    [[ -f "$dir/console.sh" ]] || {
+        echo "ERROR: apply_profile: $dir/console.sh not found — CONSOLE_DIR must be a built console distribution." >&2
+        return 1
+    }
+    cd "$dir" || return 1
+
+    local base="${BCOS_RPC_BASE_PORT:-20200}" list="" i
+    for ((i = 0; i < node_count; i++)); do
+        list+="${list:+, }\"127.0.0.1:$((base + i))\""
+    done
+    PEERS="$list" perl -0pi -e 's{^\s*peers\s*=.*$}{peers=[$ENV{PEERS}]}m' conf/config.toml
+    echo "  console $dir -> peers=[$list]"
+}
+
 echo ">> [4/4] replaying setSystemConfigByKey via console (needs live chain)"
+_console_prepare || exit 1
 # The console exits 0 even when it never reached the chain (it prints "Failed to create BcosSDK"
 # and returns success), so `set -e` alone does NOT catch a failed replay. Without an explicit
 # check, a run where all 14 production flags silently failed to apply still reports "cluster

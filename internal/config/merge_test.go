@@ -285,3 +285,62 @@ func TestWeb3RPCURLHasNoBuiltinDefault(t *testing.T) {
 		t.Errorf("cluster.web3_rpc_url must have no built-in default, got %q", v)
 	}
 }
+
+// A gate round on a machine that already runs a chain has to move its ports. When it does, the RPC
+// URLs must move with them: the engine's own fallbacks are the literals http://127.0.0.1:20200 and
+// :8545, so a run configured onto 21200/9545 sent its dual_rpc traffic to whatever was listening on
+// the DEFAULT ports -- a different chain entirely, which answered.
+func TestRPCURLsFollowTheConfiguredPortBases(t *testing.T) {
+	got, err := Merge(Inputs{
+		Defaults: Defaults(),
+		File: map[string]string{
+			"cluster.bcos_base_port": "21200",
+			"cluster.web3_base_port": "9545",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := got["cluster.bcos_rpc_url"]; v.S != "http://127.0.0.1:21200" {
+		t.Errorf("bcos_rpc_url = %q, want it to follow bcos_base_port", v.S)
+	}
+	if v := got["cluster.web3_rpc_url"]; v.S != "http://127.0.0.1:9545" {
+		t.Errorf("web3_rpc_url = %q, want it to follow web3_base_port", v.S)
+	}
+	// The derived value reports the layer that actually decided it, not "built-in default" -- an
+	// operator reading `config show` needs to see that their fbt.yaml is what moved it.
+	if v := got["cluster.bcos_rpc_url"]; v.From != SourceFile {
+		t.Errorf("bcos_rpc_url From = %v, want fbt.yaml", v.From)
+	}
+}
+
+// An explicit URL is a deliberate override -- pointing the gate at a node other than node0, or at
+// another host entirely. Derivation must never overwrite it.
+func TestAnExplicitRPCURLOutranksTheDerivedOne(t *testing.T) {
+	got, err := Merge(Inputs{
+		Defaults: Defaults(),
+		File:     map[string]string{"cluster.bcos_base_port": "21200"},
+		Env:      map[string]string{"cluster.bcos_rpc_url": "http://10.0.0.5:20203"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := got["cluster.bcos_rpc_url"]; v.S != "http://10.0.0.5:20203" {
+		t.Errorf("bcos_rpc_url = %q, want the explicit value", v.S)
+	}
+}
+
+// With the ports left alone, nothing is derived: web3_rpc_url stays ABSENT so oracle_lib.sh keeps
+// resolving it from node0's config.ini (see the deliberate-omission note on Defaults).
+func TestDefaultPortsDeriveNothing(t *testing.T) {
+	got, err := Merge(Inputs{Defaults: Defaults()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got["cluster.web3_rpc_url"]; ok {
+		t.Error("web3_rpc_url was invented with no web3_base_port set")
+	}
+	if v := got["cluster.bcos_rpc_url"]; v.S != "http://127.0.0.1:20200" {
+		t.Errorf("bcos_rpc_url = %q, want the built-in default untouched", v.S)
+	}
+}
