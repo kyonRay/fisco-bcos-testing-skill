@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"io"
@@ -21,7 +22,7 @@ type probe struct {
 }
 
 func (p *probe) cmd() Command {
-	return func(o GlobalOptions, args []string, stdout, stderr io.Writer) exitcode.Code {
+	return func(_ context.Context, o GlobalOptions, args []string, stdout, stderr io.Writer) exitcode.Code {
 		p.got, p.args, p.called = o, args, true
 		return p.ret
 	}
@@ -30,7 +31,7 @@ func (p *probe) cmd() Command {
 // probeAcceptingGlobals re-registers the global flags on its own flag set, which is how the real
 // subcommands let `fbt config show --output json` work with the flag after the command name.
 func probeAcceptingGlobals(p *probe) Command {
-	return func(o GlobalOptions, args []string, stdout, stderr io.Writer) exitcode.Code {
+	return func(_ context.Context, o GlobalOptions, args []string, stdout, stderr io.Writer) exitcode.Code {
 		fs := flag.NewFlagSet("probe", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		finish := RegisterGlobalFlags(fs, &o)
@@ -48,7 +49,7 @@ func probeAcceptingGlobals(p *probe) Command {
 func run(t *testing.T, table map[string]Command, argv ...string) (exitcode.Code, string, string) {
 	t.Helper()
 	var out, errOut bytes.Buffer
-	code := dispatch(table, argv, &out, &errOut)
+	code := dispatch(context.Background(), table, argv, &out, &errOut)
 	return code, out.String(), errOut.String()
 }
 
@@ -241,5 +242,38 @@ func TestGlobalFlagErrorsRespectTheRequestedOutputShape(t *testing.T) {
 	// business, and must not silently reshape a global parse error.
 	if m, err := preScanOutputMode([]string{"probe", "--output", "json"}); err != nil || m != OutputHuman {
 		t.Errorf("preScan leaked past the command name: %v, %v", m, err)
+	}
+}
+
+// spec §9: 130 outranks every aggregate result. A command that finished its work before noticing
+// the interrupt must not report that work as a clean result -- the user stopped the run, so what
+// it had concluded is no longer an answer about the chain.
+func TestAnInterruptedRunExits130WhateverTheCommandReturned(t *testing.T) {
+	for _, ret := range []exitcode.Code{exitcode.OK, exitcode.GateFail, exitcode.Host} {
+		ctx, cancel := context.WithCancel(context.Background())
+		table := map[string]Command{
+			"probe": func(c context.Context, _ GlobalOptions, _ []string, _, _ io.Writer) exitcode.Code {
+				cancel() // the interrupt lands while the command is running
+				return ret
+			},
+		}
+		var out, errOut bytes.Buffer
+		if code := dispatch(ctx, table, []string{"probe"}, &out, &errOut); code != exitcode.Canceled {
+			t.Errorf("command returned %v: dispatch exited %v, want 130", ret, code)
+		}
+	}
+}
+
+// ...but an uninterrupted run keeps its own verdict. Without this the check above could be
+// satisfied by always returning 130.
+func TestAnUninterruptedRunKeepsItsVerdict(t *testing.T) {
+	table := map[string]Command{
+		"probe": func(context.Context, GlobalOptions, []string, io.Writer, io.Writer) exitcode.Code {
+			return exitcode.GateFail
+		},
+	}
+	var out, errOut bytes.Buffer
+	if code := dispatch(context.Background(), table, []string{"probe"}, &out, &errOut); code != exitcode.GateFail {
+		t.Errorf("code = %v, want 10", code)
 	}
 }

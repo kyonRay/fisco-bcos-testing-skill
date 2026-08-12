@@ -8,6 +8,7 @@ package events
 import (
 	"encoding/json"
 	"io"
+	"strconv"
 	"sync"
 	"time"
 
@@ -80,6 +81,46 @@ func (n *Normalizer) Read(source string, r io.Reader, sink func(Event)) error {
 		sink(e)
 		n.mu.Unlock()
 	}
+}
+
+// HostSource is the source label on events the host itself emits (run_started, run_finished). It
+// is deliberately distinct from any engine command name, so a reader can always tell which side of
+// the pipe an event came from.
+const HostSource = "host"
+
+// Emit places one host-generated event into the SAME sequence as the engine's.
+//
+// run_started and run_finished have to interleave correctly with the engine's command_started and
+// command_finished (spec §8): a consumer replaying the stream by seq must see the run open before
+// the first command and close after the last. A separate counter for host events would produce two
+// independent orderings that cannot be merged after the fact.
+//
+// The schema_version stamped here is the host's own major. The host validates every engine event
+// against ExpectedEventMajor, so claiming any other major on its own events would mean the stream
+// contained two incompatible framings at once.
+func (n *Normalizer) Emit(ev string, payload map[string]interface{}, sink func(Event)) {
+	if len(payload) == 0 {
+		payload = nil
+	}
+	now := n.Now
+	if now == nil {
+		now = time.Now
+	}
+	e := Event{
+		SchemaVersion: strconv.Itoa(n.ExpectedEventMajor) + ".0.0",
+		Ev:            ev,
+		RunID:         n.RunID,
+		TS:            now().UTC().Format(time.RFC3339Nano),
+		Source:        HostSource,
+		Payload:       payload,
+	}
+	n.mu.Lock()
+	n.seq++
+	e.Seq = n.seq
+	if sink != nil {
+		sink(e)
+	}
+	n.mu.Unlock()
 }
 
 func (n *Normalizer) normalize(source string, raw map[string]interface{}) (Event, error) {

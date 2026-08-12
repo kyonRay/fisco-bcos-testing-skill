@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -16,16 +17,16 @@ import (
 	"github.com/kyonRay/fisco-bcos-testing-skill/internal/profile"
 )
 
-func profileCommand(o GlobalOptions, args []string, stdout, stderr io.Writer) exitcode.Code {
+func profileCommand(ctx context.Context, o GlobalOptions, args []string, stdout, stderr io.Writer) exitcode.Code {
 	if len(args) == 0 {
 		return emitError(stdout, stderr, o.Output,
 			fbterr.Configf("profile needs a subcommand: list or show"))
 	}
 	switch args[0] {
 	case "list":
-		return profileList(o, args[1:], stdout, stderr)
+		return profileList(ctx, o, args[1:], stdout, stderr)
 	case "show":
-		return profileShow(o, args[1:], stdout, stderr)
+		return profileShow(ctx, o, args[1:], stdout, stderr)
 	}
 	return emitError(stdout, stderr, o.Output,
 		fbterr.Configf("unknown subcommand %q; profile takes list or show", args[0]))
@@ -53,7 +54,7 @@ func profileDir(o *GlobalOptions, name string, args []string, stdout, stderr io.
 	return p, fs.Args(), err
 }
 
-func profileList(o GlobalOptions, args []string, stdout, stderr io.Writer) exitcode.Code {
+func profileList(ctx context.Context, o GlobalOptions, args []string, stdout, stderr io.Writer) exitcode.Code {
 	p, rest, err := profileDir(&o, "profile list", args, stdout, stderr)
 	if err != nil {
 		return emitError(stdout, stderr, o.Output, err)
@@ -101,7 +102,7 @@ type kvOut struct {
 	Value string `json:"value"`
 }
 
-func profileShow(o GlobalOptions, args []string, stdout, stderr io.Writer) exitcode.Code {
+func profileShow(ctx context.Context, o GlobalOptions, args []string, stdout, stderr io.Writer) exitcode.Code {
 	p, rest, err := profileDir(&o, "profile show", args, stdout, stderr)
 	if err != nil {
 		return emitError(stdout, stderr, o.Output, err)

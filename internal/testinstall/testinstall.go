@@ -70,6 +70,21 @@ func (i Install) WriteProfile(t *testing.T, name, body string) string {
 	return p
 }
 
+// Scripts is the directory an installed engine keeps its executables in.
+func (i Install) Scripts() string { return filepath.Join(i.Root, "libexec", "fbt", "scripts") }
+
+// WriteScript installs a stand-in engine script. It lands at 0755 on purpose: the host EXECS these
+// files, and a 0644 script fails with a bare permission-denied -- which is exactly what shipped
+// once, because every bash test invokes scripts as `bash x.sh` and never noticed.
+func (i Install) WriteScript(t *testing.T, name, body string) string {
+	t.Helper()
+	p := filepath.Join(i.Scripts(), name)
+	if err := os.WriteFile(p, []byte("#!/usr/bin/env bash\n"+body), 0o755); err != nil {
+		t.Fatalf("write %s: %v", p, err)
+	}
+	return p
+}
+
 // WriteConfig drops an fbt.yaml into the install root and returns its path.
 func (i Install) WriteConfig(t *testing.T, body string) string {
 	t.Helper()

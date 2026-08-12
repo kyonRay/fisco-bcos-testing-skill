@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -89,7 +90,7 @@ type shownKey struct {
 	Secret bool     `json:"secret,omitempty"`
 }
 
-func configCommand(o GlobalOptions, args []string, stdout, stderr io.Writer) exitcode.Code {
+func configCommand(ctx context.Context, o GlobalOptions, args []string, stdout, stderr io.Writer) exitcode.Code {
 	if len(args) == 0 {
 		return emitError(stdout, stderr, o.Output,
 			fbterr.Configf("config needs a subcommand: show or path"))
@@ -97,15 +98,15 @@ func configCommand(o GlobalOptions, args []string, stdout, stderr io.Writer) exi
 	sub, rest := args[0], args[1:]
 	switch sub {
 	case "show":
-		return configShow(o, rest, stdout, stderr)
+		return configShow(ctx, o, rest, stdout, stderr)
 	case "path":
-		return configPath(o, rest, stdout, stderr)
+		return configPath(ctx, o, rest, stdout, stderr)
 	}
 	return emitError(stdout, stderr, o.Output,
 		fbterr.Configf("unknown subcommand %q; config takes show or path", sub))
 }
 
-func configShow(o GlobalOptions, args []string, stdout, stderr io.Writer) exitcode.Code {
+func configShow(ctx context.Context, o GlobalOptions, args []string, stdout, stderr io.Writer) exitcode.Code {
 	fs := flag.NewFlagSet("config show", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	finish := RegisterGlobalFlags(fs, &o)
@@ -199,7 +200,7 @@ func redact(r keys.Row, v string) string {
 	return v
 }
 
-func configPath(o GlobalOptions, args []string, stdout, stderr io.Writer) exitcode.Code {
+func configPath(ctx context.Context, o GlobalOptions, args []string, stdout, stderr io.Writer) exitcode.Code {
 	fs := flag.NewFlagSet("config path", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	finish := RegisterGlobalFlags(fs, &o)

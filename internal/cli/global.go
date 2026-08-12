@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -29,7 +30,12 @@ type GlobalOptions struct {
 
 // Command is one subcommand. It receives the already-parsed globals, its own remaining arguments,
 // and the two streams -- never os.Stdout directly, so every command is testable in memory.
-type Command func(o GlobalOptions, args []string, stdout, stderr io.Writer) exitcode.Code
+//
+// ctx is cancelled when the user interrupts the run. Every command takes it, including the static
+// ones that cannot be interrupted usefully: a signature that only chain-touching commands carry
+// would have to be widened again the first time a "static" command grows a network call, and the
+// commands that ignore it cost nothing.
+type Command func(ctx context.Context, o GlobalOptions, args []string, stdout, stderr io.Writer) exitcode.Code
 
 // commands is the real table. Only implemented commands are registered: a placeholder that
 // answers nothing would still show up in `fbt --help` and in shell completion, promising a command
@@ -92,11 +98,11 @@ func (g *globalFlags) finish() error {
 }
 
 // Dispatch is the process entry point: it owns the real command table.
-func Dispatch(argv []string, stdout, stderr io.Writer) exitcode.Code {
-	return dispatch(commands, argv, stdout, stderr)
+func Dispatch(ctx context.Context, argv []string, stdout, stderr io.Writer) exitcode.Code {
+	return dispatch(ctx, commands, argv, stdout, stderr)
 }
 
-func dispatch(table map[string]Command, argv []string, stdout, stderr io.Writer) exitcode.Code {
+func dispatch(ctx context.Context, table map[string]Command, argv []string, stdout, stderr io.Writer) exitcode.Code {
 	var opts GlobalOptions
 	fs := flag.NewFlagSet("fbt", flag.ContinueOnError)
 	// The flag package's own messages bypass the output contract, so they are discarded and every
@@ -150,7 +156,14 @@ func dispatch(table map[string]Command, argv []string, stdout, stderr io.Writer)
 			fbterr.Configf("unknown command %q; available commands: %s",
 				args[0], strings.Join(names(table), ", ")))
 	}
-	return cmd(opts, args[1:], stdout, stderr)
+	code := cmd(ctx, opts, args[1:], stdout, stderr)
+	// An interrupted run is 130 no matter what the command concluded before noticing (spec §9).
+	// Without this the cancellation would only surface for commands that check ctx themselves, so
+	// ^C during a static command would exit 0 and read as a clean result.
+	if ctx.Err() != nil {
+		return exitcode.Canceled
+	}
+	return code
 }
 
 // preScanOutputMode finds --output in a raw argv before the flag package has had a chance to

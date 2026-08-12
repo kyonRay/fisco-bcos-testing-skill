@@ -321,11 +321,17 @@ func TestAMissingWorkingDirectoryIsAnInfraError(t *testing.T) {
 // Large outputs must not deadlock: a child filling the stdout pipe while the host waits on exit is
 // the classic hang, and a gate run produces plenty of output.
 func TestLargeOutputDoesNotDeadlock(t *testing.T) {
-	res, err := run(t, Spec{Script: script(t, `for i in $(seq 1 20000); do echo "line $i padding padding padding"; done`)})
+	// Counted on the live writer, not on Result: Result deliberately keeps only a tail, and
+	// counting there would turn this deadlock test into an assertion about the tail size.
+	var full strings.Builder
+	_, err := run(t, Spec{
+		Script: script(t, `for i in $(seq 1 20000); do echo "line $i padding padding padding"; done`),
+		Stdout: &full,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := strings.Count(string(res.Stdout), "\n"); n != 20000 {
+	if n := strings.Count(full.String(), "\n"); n != 20000 {
 		t.Errorf("captured %d lines, want 20000", n)
 	}
 }

@@ -7,7 +7,6 @@ package runner
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -30,6 +29,14 @@ const DefaultKillGrace = 5 * time.Second
 // truncated tail rather than a run that never returns.
 const DrainGrace = 2 * time.Second
 
+// DefaultTailBytes is how much of each stream Result keeps when Spec does not say.
+//
+// Result holds a TAIL, not the whole stream: a fuzz batch or a node dumping its log to stdout can
+// produce hundreds of megabytes, and the host has no reason to hold any of it in memory. What a
+// diagnostic actually needs is the end (spec §11 asks for the stderr tail verbatim), and the
+// complete stream goes to Spec.Stdout/Stderr as it arrives.
+const DefaultTailBytes = 64 * 1024
+
 type Spec struct {
 	Script string // absolute path to the engine script
 	Args   []string
@@ -39,6 +46,15 @@ type Spec struct {
 	// Events receives one raw fd 3 line at a time. Nil means nobody is listening -- the engine
 	// must still run, because it has to work standalone (spec §4).
 	Events func(line []byte)
+
+	// Stdout and Stderr, when non-nil, receive the engine's output AS IT ARRIVES. A gate round
+	// takes minutes and narrates itself throughout; withholding that until exit leaves an operator
+	// staring at nothing, and a run the host kills on deadline would show nothing at all.
+	Stdout io.Writer
+	Stderr io.Writer
+
+	// TailBytes bounds how much of each stream Result keeps. 0 means DefaultTailBytes.
+	TailBytes int
 
 	Timeout   time.Duration // 0 means no deadline
 	KillGrace time.Duration // 0 means DefaultKillGrace
@@ -53,8 +69,13 @@ type Result struct {
 	// fact the host sent that signal on purpose (spec §9's timeout special case).
 	TimedOut bool
 	Canceled bool
-	Stdout   []byte
-	Stderr   []byte
+
+	// Stdout and Stderr are the last TailBytes of each stream, not the whole thing; the flags say
+	// whether anything was dropped, so a caller never quotes a tail as if it were the full output.
+	Stdout          []byte
+	Stderr          []byte
+	StdoutTruncated bool
+	StderrTruncated bool
 }
 
 // Run starts the engine, streams its three outputs, and waits for it to finish.
@@ -136,11 +157,15 @@ func Run(ctx context.Context, s Spec) (Result, error) {
 	errW.Close()
 	eventW.Close()
 
-	var stdout, stderr bytes.Buffer
+	limit := s.TailBytes
+	if limit <= 0 {
+		limit = DefaultTailBytes
+	}
+	stdout, stderr := &tail{max: limit}, &tail{max: limit}
 	var wg sync.WaitGroup
 	wg.Add(3)
-	go func() { defer wg.Done(); io.Copy(&stdout, outR) }()
-	go func() { defer wg.Done(); io.Copy(&stderr, errR) }()
+	go func() { defer wg.Done(); io.Copy(fanOut(stdout, s.Stdout), outR) }()
+	go func() { defer wg.Done(); io.Copy(fanOut(stderr, s.Stderr), errR) }()
 	go func() { defer wg.Done(); drainEvents(eventR, s.Events) }()
 
 	res := wait(ctx, cmd, s)
@@ -154,8 +179,54 @@ func Run(ctx context.Context, s Spec) (Result, error) {
 	if !drained {
 		wg.Wait() // the closes above release the blocked readers
 	}
-	res.Stdout, res.Stderr = stdout.Bytes(), stderr.Bytes()
+	res.Stdout, res.StdoutTruncated = stdout.buf, stdout.truncated
+	res.Stderr, res.StderrTruncated = stderr.buf, stderr.truncated
 	return res, nil
+}
+
+// fanOut sends every byte to the tail and, when one is configured, to the caller's live writer.
+// A write error on the caller's writer must not stop the copy: the engine would then block on a
+// full pipe and the run would hang on the host's own bookkeeping.
+func fanOut(t *tail, live io.Writer) io.Writer {
+	if live == nil {
+		return t
+	}
+	return io.MultiWriter(t, ignoreErrors{live})
+}
+
+type ignoreErrors struct{ w io.Writer }
+
+func (i ignoreErrors) Write(p []byte) (int, error) {
+	_, _ = i.w.Write(p)
+	return len(p), nil
+}
+
+// tail keeps at most max bytes, discarding from the FRONT. It is written by exactly one copier
+// goroutine and read only after that goroutine has finished, so it needs no lock of its own.
+type tail struct {
+	max       int
+	buf       []byte
+	truncated bool
+}
+
+func (t *tail) Write(p []byte) (int, error) {
+	n := len(p)
+	switch {
+	case n >= t.max:
+		// One write bigger than the whole window: keep its END. Keeping the front here is the
+		// classic bug -- a single huge log line would then pin the buffer to its first bytes and
+		// every later line would be dropped.
+		t.buf = append(t.buf[:0], p[n-t.max:]...)
+		t.truncated = true
+	case len(t.buf)+n > t.max:
+		drop := len(t.buf) + n - t.max
+		t.buf = append(t.buf[:0], t.buf[drop:]...) // copies forward within one slice: safe
+		t.buf = append(t.buf, p...)
+		t.truncated = true
+	default:
+		t.buf = append(t.buf, p...)
+	}
+	return n, nil
 }
 
 // waitFor reports whether wg finished within d.

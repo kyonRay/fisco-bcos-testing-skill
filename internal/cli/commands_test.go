@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"path/filepath"
 	"strings"
@@ -27,7 +28,7 @@ func fixture(t *testing.T, extra ...string) (testinstall.Install, []string) {
 func runReal(t *testing.T, argv ...string) (exitcode.Code, string, string) {
 	t.Helper()
 	var out, errOut bytes.Buffer
-	code := dispatch(commands, argv, &out, &errOut)
+	code := dispatch(context.Background(), commands, argv, &out, &errOut)
 	return code, out.String(), errOut.String()
 }
 
