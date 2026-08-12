@@ -18,6 +18,27 @@ const (
 
 func (c Code) Int() int { return int(c) }
 
+// String names a code in the SAME vocabulary the engine's command_finished outcome uses, so a
+// skip reason or a log line reads the same on both sides of the pipe. Anything outside the six is
+// "unknown" rather than a number, because a number here would look like a seventh exit code.
+func (c Code) String() string {
+	switch c {
+	case OK:
+		return "ok"
+	case GateFail:
+		return "gate_fail"
+	case Config:
+		return "config_error"
+	case Infra:
+		return "infra_error"
+	case Host:
+		return "host_error"
+	case Canceled:
+		return "canceled"
+	}
+	return "unknown"
+}
+
 func FromClass(c fbterr.Class) Code {
 	switch c {
 	case fbterr.ClassConfig:

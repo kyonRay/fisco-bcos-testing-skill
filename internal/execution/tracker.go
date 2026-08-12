@@ -23,7 +23,7 @@ type terminator struct {
 // command_finished for the outer one's terminator. The frames are a stack, and only the event that
 // empties it terminates the command the host started.
 type tracker struct {
-	root      string   // the cmd name the launched script must announce
+	root      string // the cmd name the launched script must announce
 	stack     []string
 	term      *terminator
 	abandoned []string // frames a later terminator unwound past: an engine subprocess that died hard

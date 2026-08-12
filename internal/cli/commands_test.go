@@ -41,11 +41,16 @@ func decode(t *testing.T, s string) map[string]interface{} {
 	return doc
 }
 
+// Only implemented commands are registered. A placeholder that answers nothing would still appear
+// in `fbt --help` and in shell completion, promising a command that does not exist.
 func TestRealTableRegistersOnlyImplementedCommands(t *testing.T) {
-	want := map[string]bool{"config": true, "profile": true}
+	want := map[string]bool{
+		"config": true, "profile": true, "doctor": true, "plan": true,
+		"case": true, "cluster": true, "gate": true,
+	}
 	for name := range commands {
 		if !want[name] {
-			t.Errorf("command %q is registered but not implemented in 1A", name)
+			t.Errorf("command %q is registered but is not in the implemented set", name)
 		}
 	}
 	for name := range want {

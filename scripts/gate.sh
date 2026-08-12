@@ -117,7 +117,11 @@ while getopts "p:o:h" opt; do
 done
 
 [[ -z "$PROFILE_PATH" ]] && { echo "ERROR: -p <profile> is required. -h for help." >&2; exit 2; }
-[[ -f "$PROFILE_PATH" ]] || { echo "ERROR: profile not found: $PROFILE_PATH" >&2; exit 1; }
+# exit 2, not 1: a profile that is not there is a CONFIGURATION error. The event
+# protocol maps 2 to config_error (20, "fix your config") and every other non-zero to
+# engine_error (40, "fbt has a bug") -- and exit 1 here really did report a mistyped
+# -p as an fbt defect. gate_upgrade.sh already used 2; these three did not.
+[[ -f "$PROFILE_PATH" ]] || { echo "ERROR: profile not found: $PROFILE_PATH" >&2; exit 2; }
 
 profile_base="$(basename "$PROFILE_PATH")"
 profile_name="${profile_base%.*}"
@@ -181,9 +185,22 @@ fi
 # ---------------------------------------------------------------------------
 
 APPLY_PROFILE="$SCRIPT_DIR/apply_profile.sh"
-[[ -f "$APPLY_PROFILE" ]] || { echo "ERROR: apply_profile.sh not found at $APPLY_PROFILE" >&2; exit 1; }
+# Every failure from here down names its own outcome. Without event_set_outcome the protocol's
+# fallback maps any non-zero exit to engine_error, i.e. exit 40 "fbt has a bug" -- so a chain that
+# would not come up, a test machine missing the sibling skill, and a genuine fbt defect all
+# reported the same code. Observed end to end: a machine with no cluster_up.sh installed reported
+# 40 instead of 30.
+[[ -f "$APPLY_PROFILE" ]] || {
+    event_set_outcome infra_error
+    echo "ERROR: apply_profile.sh not found at $APPLY_PROFILE" >&2
+    exit 1
+}
 
 echo ">> [1/4] apply_profile (needs live chain): bringing up cluster for $profile_name"
+# A cluster that will not come up is an infrastructure condition (spec section 9), which is a
+# different instruction to the operator than "file a bug". Under set -e this call used to abort
+# the script with apply_profile's own status and no outcome at all.
+event_set_outcome infra_error
 bash "$APPLY_PROFILE" -p "$PROFILE_PATH" -o "$CLUSTER_OUTDIR"
 
 CLUSTER_OUTDIR_ABS="$(cd "$CLUSTER_OUTDIR" && pwd)"
@@ -200,6 +217,7 @@ source "$SCRIPT_DIR/profile_lib.sh"
 source "$SCRIPT_DIR/oracle_lib.sh"
 profile_load "$PROFILE_PATH"
 RPC_URL="$(_primary_web3_url "$NODE_DIR")" || {
+    event_set_outcome infra_error   # no reachable RPC: the machine, not the chain under test
     echo "ERROR: gate: could not derive the primary Web3 RPC URL from $NODE_DIR/node0/config.ini" >&2
     exit 1
 }
@@ -221,6 +239,7 @@ FAILURES_OUTDIR="$CLUSTER_OUTDIR_ABS"
 # discovery happens once, up front, and feeds bounded one-shot oracle calls below instead.
 mapfile -t node_pids < <(pgrep -f "$NODE_DIR/" 2>/dev/null || true)
 if [[ ${#node_pids[@]} -eq 0 ]]; then
+    event_set_outcome infra_error   # nothing is running: there is no chain to judge
     echo "ERROR: could not discover any live fisco-bcos node PIDs under $NODE_DIR — apply_profile.sh may not have brought up a chain, or the cluster_up.sh process-launch layout has changed. Real-run requires a live chain; refusing to silently continue with no crash-oracle PIDs." >&2
     exit 1
 fi
@@ -318,7 +337,11 @@ echo ">> [4/4] tearing down cluster (needs live chain)"
 bash "$NODE_DIR/stop_all.sh" || true
 
 if [[ "$oracle_tripped" == 1 || "$scenario_failed" == 1 ]]; then
+    # THE verdict this whole script exists to produce: the chain failed the gate (10), which is an
+    # answer about the chain, not a fault in the harness (40).
+    event_set_outcome gate_fail
     echo "GATE: FAIL (oracle_tripped=$oracle_tripped scenario_failed=$scenario_failed)"
     exit 1
 fi
+event_set_outcome pass
 echo "GATE: PASS"

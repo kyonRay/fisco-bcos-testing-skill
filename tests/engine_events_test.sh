@@ -111,4 +111,45 @@ out="$(bash scripts/gate.sh -p "$PROFILE" --dry-run 2>&1)"
 assert_not_contains "$out" '"schema_version"' "with fd 3 closed no event text leaks into stdout"
 assert_not_contains "$out" 'command_started' "...not even the event names"
 
+# ---------------------------------------------------------------------------
+# A profile that is not there is a CONFIGURATION error, not an engine fault. The event protocol
+# maps exit 2 to config_error (20) and every other non-zero to engine_error (40), so exit 1 here
+# reported a mistyped -p as an fbt bug -- observed end to end before this was fixed:
+# `fbt gate run -p production-enterprise` came back exit 40, "gate.sh failed with an engine fault".
+# ---------------------------------------------------------------------------
+for spec in \
+    "gate.sh|bash scripts/gate.sh -p /no/such.profile" \
+    "apply_profile.sh|bash scripts/apply_profile.sh -p /no/such.profile"
+do
+    name="${spec%%|*}"; cmd="${spec#*|}"
+    ev="$(capture $cmd)"
+    assert_eq "2" "$(last_rc)" "$name: a missing profile exits 2"
+    assert_contains "$ev" '"outcome":"config_error"' "$name: a missing profile is config_error, not engine_error"
+done
+
+# The same for a .case whose profile does not resolve.
+bad_case="$tmp/badprofile.case"
+printf '[case]\nstatus = active\nprofile = /no/such.profile\ninput = true\nexpect_oracle = pass\n' > "$bad_case"
+ev="$(capture bash scripts/run_case.sh "$bad_case")"
+assert_eq "2" "$(last_rc)" "run_case.sh: a case naming a missing profile exits 2"
+assert_contains "$ev" '"outcome":"config_error"' "run_case.sh: ...and is config_error"
+
+# ---------------------------------------------------------------------------
+# A broken INSTALLATION is infra_error (30, "fix the test machine"), not engine_error (40, "file a
+# bug against fbt"). Before gate.sh named its own outcomes, the protocol's rc fallback called every
+# non-zero exit an engine fault, and a machine missing the sibling skill really did report 40.
+#
+# Hermetic: a scripts dir holding gate.sh and the libraries it sources, but no apply_profile.sh.
+# ---------------------------------------------------------------------------
+broken="$tmp/broken-install"
+mkdir -p "$broken"
+cp scripts/gate.sh scripts/event_lib.sh scripts/profile_lib.sh scripts/oracle_lib.sh \
+   scripts/failures_lib.sh "$broken/"
+cp -r scripts/scenarios "$broken/scenarios"
+ev="$(capture bash "$broken/gate.sh" -p "$PROFILE" -o "$tmp/ws")"
+assert_contains "$ev" '"outcome":"infra_error"' \
+    "a missing apply_profile.sh is infra_error, not engine_error"
+assert_not_contains "$ev" '"outcome":"engine_error"' \
+    "...and is never reported as an fbt bug"
+
 assert_done

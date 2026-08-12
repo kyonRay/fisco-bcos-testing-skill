@@ -220,7 +220,9 @@ fi
 # above already exited with the raw, unresolved value (stable/logical, per _run_case_resolve_profile's
 # own doc), so only the real-run path below ever sees the resolved absolute path.
 CASE_PROFILE="$(_run_case_resolve_profile "$CASE_PROFILE" "$(dirname "$CASE_PATH")")"
-[[ -f "$CASE_PROFILE" ]] || { echo "ERROR: $CASE_PATH: profile not found: $CASE_PROFILE" >&2; exit 1; }
+# exit 2 = config_error under the event protocol: a .case naming a profile that does not
+# exist is the author's mistake, not an engine fault (which exit 1 would report as 40).
+[[ -f "$CASE_PROFILE" ]] || { echo "ERROR: $CASE_PATH: profile not found: $CASE_PROFILE" >&2; exit 2; }
 
 APPLY_PROFILE="$SCRIPT_DIR/apply_profile.sh"
 [[ -f "$APPLY_PROFILE" ]] || { echo "ERROR: apply_profile.sh not found at $APPLY_PROFILE" >&2; exit 1; }

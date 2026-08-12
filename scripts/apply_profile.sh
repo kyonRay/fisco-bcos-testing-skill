@@ -73,7 +73,9 @@ while getopts "p:o:h" opt; do
 done
 
 [[ -z "$PROFILE_PATH" ]] && { echo "ERROR: -p <profile> is required. -h for help." >&2; exit 2; }
-[[ -f "$PROFILE_PATH" ]] || { echo "ERROR: profile not found: $PROFILE_PATH" >&2; exit 1; }
+# exit 2 = config_error under the event protocol; exit 1 would be reported as an fbt
+# bug (40) for what is a mistyped or missing -p.
+[[ -f "$PROFILE_PATH" ]] || { echo "ERROR: profile not found: $PROFILE_PATH" >&2; exit 2; }
 
 # _apply_profile_cluster_up_args <outdir> <version> <fisco_bin> <node_count> <ports> <web3_base>
 # <sm_mode> — fills global APPLY_CU_ARGS with the cluster_up.sh argv (Task 3's cluster_up.sh
@@ -180,6 +182,7 @@ fi
 # fisco-bcos-testing checkout) can point FBT_ENGINE_SCRIPTS at wherever the engine scripts live.
 if [[ -z "${CLUSTER_UP:-}" ]]; then
     CLUSTER_UP="$(_resolve_engine_script cluster_up.sh)" || {
+        event_set_outcome infra_error   # the sibling skill is not installed: fix the machine (30)
         echo "ERROR: cluster_up.sh not found (tried \$FBT_ENGINE_SCRIPTS, $_SELF_DIR, sibling fisco-bcos-testing/scripts — expected the fisco-bcos-testing skill checked out alongside this one, or FBT_ENGINE_SCRIPTS set)" >&2
         exit 1
     }
