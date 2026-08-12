@@ -201,10 +201,11 @@ baseline right after cluster bring-up, then again after every scenario (`gate.sh
 `run_oracles_once`). Any trip, on any call, fails the whole gate round and appends one row to
 `failures.jsonl` (see 报告).
 
-**GAP**: through `gate.sh`'s own sweep, only crash and consensus-halt actually get a chance to
-fire for real — state-mismatch needs per-node RPC discovery that `gate.sh`'s single `-r "$RPC_URL"`
-call doesn't do. See `references/oracle-detection.md`'s state-mismatch section for the mechanism
-and the one place a real cross-node comparison does run today.
+All three fire through `gate.sh`'s own sweep. State-mismatch no longer depends on the single
+`-r "$RPC_URL"` call: `gate.sh:300` discovers each node's Web3 RPC under `<outdir>/127.0.0.1`
+(`_discover_stateroot_urls`, line 179) and demands at least two — fewer is an error, not a silent
+skip (line 302). A 2026-08-12 run against a real 4-node AIR chain compared all four at every
+checkpoint. See `references/oracle-detection.md` for the decision logic.
 
 **Explicitly not an oracle**: grepping logs for `ERROR`. It is noisy and false-positive-prone, so
 it is deliberately excluded from the pass/fail judgment — though failure evidence (including logs)
