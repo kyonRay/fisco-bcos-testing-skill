@@ -38,6 +38,45 @@ type Row struct {
 	Max    *int
 	Secret bool
 	Domain Domain
+	// Commands are the fbt commands whose dependency surface includes this key (spec §7.4's
+	// fourth column). EMPTY means every command -- the repo root and the engine script directory
+	// are needed by anything that starts the engine at all. The spec's column names scenario
+	// families (dual_rpc, malformed, jsd, ut); those fold into `gate`, which is the command that
+	// runs them.
+	Commands []string
+}
+
+// KnownCommands is the vocabulary `config show --command` and `doctor --command` accept. A name
+// outside it is a usage error rather than a filter that silently matches nothing.
+func KnownCommands() []string {
+	return []string{"case", "cluster", "config", "doctor", "fuzz", "gate", "profile"}
+}
+
+func IsKnownCommand(cmd string) bool {
+	for _, c := range KnownCommands() {
+		if c == cmd {
+			return true
+		}
+	}
+	return false
+}
+
+// RowsForCommand narrows the registry to the keys that command actually consumes.
+func RowsForCommand(cmd string) []Row {
+	out := make([]Row, 0, len(table))
+	for _, r := range table {
+		if len(r.Commands) == 0 {
+			out = append(out, r) // needed everywhere
+			continue
+		}
+		for _, c := range r.Commands {
+			if c == cmd {
+				out = append(out, r)
+				break
+			}
+		}
+	}
+	return out
 }
 
 func intp(v int) *int { return &v }
@@ -78,69 +117,69 @@ func MustStrip() []string {
 // ones the scripts assign themselves.
 var table = []Row{
 	// ---- cluster ----
-	{Key: "cluster.bcos_base_port", Env: []string{"BCOS_RPC_BASE_PORT"}, Type: KindInt, Min: intp(1), Max: intp(65535)},
-	{Key: "cluster.bcos_rpc_url", Env: []string{"BCOS_RPC_URL"}, Type: KindString},
-	{Key: "cluster.contract_name", Env: []string{"BCOS_CONTRACT_NAME"}, Type: KindString},
-	{Key: "cluster.fund_addresses", Env: []string{"RG_FUND_ADDRESSES"}, Type: KindString},
-	{Key: "cluster.fund_amount", Env: []string{"RG_FUND_AMOUNT"}, Type: KindString},
+	{Key: "cluster.bcos_base_port", Env: []string{"BCOS_RPC_BASE_PORT"}, Type: KindInt, Min: intp(1), Max: intp(65535), Commands: []string{"cluster", "doctor"}},
+	{Key: "cluster.bcos_rpc_url", Env: []string{"BCOS_RPC_URL"}, Type: KindString, Commands: []string{"case", "fuzz", "gate"}},
+	{Key: "cluster.contract_name", Env: []string{"BCOS_CONTRACT_NAME"}, Type: KindString, Commands: []string{"gate"}},
+	{Key: "cluster.fund_addresses", Env: []string{"RG_FUND_ADDRESSES"}, Type: KindString, Commands: []string{"cluster"}},
+	{Key: "cluster.fund_amount", Env: []string{"RG_FUND_AMOUNT"}, Type: KindString, Commands: []string{"cluster"}},
 	{Key: "cluster.group_id", Env: []string{"BCOS_GROUP_ID"}, Type: KindString},
 	{Key: "cluster.node_dir", Env: []string{"NODE_DIR"}, Type: KindPath},
-	{Key: "cluster.root", Env: []string{"RG_CLUSTER_DIR"}, Type: KindPath},
-	{Key: "cluster.web3_base_port", Env: []string{"WEB3_BASE"}, Type: KindInt, Min: intp(1), Max: intp(65535)},
+	{Key: "cluster.root", Env: []string{"RG_CLUSTER_DIR"}, Type: KindPath, Commands: []string{"cluster", "gate"}},
+	{Key: "cluster.web3_base_port", Env: []string{"WEB3_BASE"}, Type: KindInt, Min: intp(1), Max: intp(65535), Commands: []string{"cluster", "doctor"}},
 	// One key, two names: dual_rpc reads WEB3_RPC_URL, the fuzz driver reads RG_FUZZ_WEB3_URL.
 	// Injecting only one aims the two at different nodes.
-	{Key: "cluster.web3_rpc_url", Env: []string{"WEB3_RPC_URL", "RG_FUZZ_WEB3_URL"}, Type: KindString},
+	{Key: "cluster.web3_rpc_url", Env: []string{"WEB3_RPC_URL", "RG_FUZZ_WEB3_URL"}, Type: KindString, Commands: []string{"fuzz", "gate"}},
 	// Host-only: shapes cluster_up's argv rather than the engine's environment (spec §7.7).
-	{Key: "cluster.node_count", Domain: DomainHost, Type: KindInt, Min: intp(1)},
-	{Key: "cluster.p2p_base_port", Domain: DomainHost, Type: KindInt, Min: intp(1), Max: intp(65535)},
-	{Key: "crypto.sm_mode", Domain: DomainHost, Type: KindBool},
+	{Key: "cluster.node_count", Domain: DomainHost, Type: KindInt, Min: intp(1), Commands: []string{"cluster", "gate"}},
+	{Key: "cluster.p2p_base_port", Domain: DomainHost, Type: KindInt, Min: intp(1), Max: intp(65535), Commands: []string{"cluster", "doctor"}},
+	{Key: "crypto.sm_mode", Domain: DomainHost, Type: KindBool, Commands: []string{"cluster"}},
 
 	// ---- engine relocation (sub-project 0) ----
-	{Key: "engine.profile_dir", Env: []string{"FBT_PROFILE_DIR"}, Type: KindPath},
+	{Key: "engine.profile_dir", Env: []string{"FBT_PROFILE_DIR"}, Type: KindPath, Commands: []string{"case", "fuzz"}},
 	{Key: "engine.scripts_dir", Env: []string{"FBT_ENGINE_SCRIPTS"}, Type: KindPath},
-	{Key: "engine.state_cases", Env: []string{"FBT_STATE_CASES"}, Type: KindPath},
+	{Key: "engine.state_cases", Env: []string{"FBT_STATE_CASES"}, Type: KindPath, Commands: []string{"fuzz"}},
 
 	// ---- fuzz ----
-	{Key: "fuzz.batch", Env: []string{"RG_FUZZ_BATCH"}, Type: KindInt, Min: intp(1)},
-	{Key: "fuzz.continue", Env: []string{"RG_FUZZ_CONTINUE"}, Type: KindBool},
-	{Key: "fuzz.iters", Env: []string{"RG_FUZZ_ITERS"}, Type: KindInt, Min: intp(1)},
-	{Key: "fuzz.profile_name", Env: []string{"RG_FUZZ_PROFILE_NAME"}, Type: KindString},
-	{Key: "fuzz.profile_path", Env: []string{"RG_FUZZ_PROFILE"}, Type: KindPath},
-	{Key: "fuzz.restart_cmd", Env: []string{"RG_FUZZ_RESTART_CMD"}, Type: KindString},
+	{Key: "fuzz.batch", Env: []string{"RG_FUZZ_BATCH"}, Type: KindInt, Min: intp(1), Commands: []string{"fuzz"}},
+	{Key: "fuzz.continue", Env: []string{"RG_FUZZ_CONTINUE"}, Type: KindBool, Commands: []string{"fuzz"}},
+	{Key: "fuzz.iters", Env: []string{"RG_FUZZ_ITERS"}, Type: KindInt, Min: intp(1), Commands: []string{"fuzz"}},
+	{Key: "fuzz.profile_name", Env: []string{"RG_FUZZ_PROFILE_NAME"}, Type: KindString, Commands: []string{"fuzz"}},
+	{Key: "fuzz.profile_path", Env: []string{"RG_FUZZ_PROFILE"}, Type: KindPath, Commands: []string{"fuzz"}},
+	{Key: "fuzz.restart_cmd", Env: []string{"RG_FUZZ_RESTART_CMD"}, Type: KindString, Commands: []string{"fuzz"}},
 	// Min 0, not 1: fuzz_bcos.sh:72-73 documents 0 as "no wall-clock budget, use RG_FUZZ_ITERS
 	// instead", and 0 is the script's own default. A floor of 1 would reject the engine's default
 	// and leave the iteration-budget mode inexpressible from configuration.
-	{Key: "fuzz.sec", Env: []string{"RG_FUZZ_SEC"}, Type: KindInt, Min: intp(0)},
-	{Key: "fuzz.seed", Env: []string{"RG_FUZZ_SEED"}, Type: KindInt},
-	{Key: "fuzz.strategy", Env: []string{"RG_FUZZ_STRATEGY"}, Type: KindEnum, Enum: []string{"struct", "bytes", "both"}},
-	{Key: "fuzz.transport", Env: []string{"RG_FUZZ_TRANSPORT"}, Type: KindEnum, Enum: []string{"bcos", "web3", "web3method"}},
+	{Key: "fuzz.sec", Env: []string{"RG_FUZZ_SEC"}, Type: KindInt, Min: intp(0), Commands: []string{"fuzz"}},
+	{Key: "fuzz.seed", Env: []string{"RG_FUZZ_SEED"}, Type: KindInt, Commands: []string{"fuzz"}},
+	{Key: "fuzz.strategy", Env: []string{"RG_FUZZ_STRATEGY"}, Type: KindEnum, Enum: []string{"struct", "bytes", "both"}, Commands: []string{"fuzz"}},
+	{Key: "fuzz.transport", Env: []string{"RG_FUZZ_TRANSPORT"}, Type: KindEnum, Enum: []string{"bcos", "web3", "web3method"}, Commands: []string{"fuzz"}},
 
 	// ---- jsd ----
-	{Key: "jsd.count", Env: []string{"JSD_COUNT"}, Type: KindInt, Min: intp(1)},
-	{Key: "jsd.dir", Env: []string{"JSD_DIR"}, Type: KindPath},
-	{Key: "jsd.group", Env: []string{"JSD_GROUP"}, Type: KindString},
-	{Key: "jsd.qps", Env: []string{"JSD_QPS"}, Type: KindInt, Min: intp(1)},
+	{Key: "jsd.count", Env: []string{"JSD_COUNT"}, Type: KindInt, Min: intp(1), Commands: []string{"gate"}},
+	{Key: "jsd.dir", Env: []string{"JSD_DIR"}, Type: KindPath, Commands: []string{"gate"}},
+	{Key: "jsd.group", Env: []string{"JSD_GROUP"}, Type: KindString, Commands: []string{"gate"}},
+	{Key: "jsd.qps", Env: []string{"JSD_QPS"}, Type: KindInt, Min: intp(1), Commands: []string{"gate"}},
 
 	// ---- oracles ----
-	{Key: "oracle.hang_sec", Env: []string{"RG_HANG_SEC"}, Type: KindInt, Min: intp(1)},
-	{Key: "oracle.once_wait_sec", Env: []string{"RG_ONCE_WAIT_SEC"}, Type: KindInt, Min: intp(0)},
-	{Key: "oracle.receipt_timeout", Env: []string{"RG_WEB3_RECEIPT_WAIT_SEC"}, Type: KindInt, Min: intp(1)},
-	{Key: "oracle.stall_sec", Env: []string{"RG_STALL_SEC"}, Type: KindInt, Min: intp(1)},
-	{Key: "oracle.stateroot_extra_urls", Env: []string{"RG_FUZZ_STATEROOT_URLS"}, Type: KindString},
+	{Key: "oracle.hang_sec", Env: []string{"RG_HANG_SEC"}, Type: KindInt, Min: intp(1), Commands: []string{"fuzz", "gate"}},
+	{Key: "oracle.once_wait_sec", Env: []string{"RG_ONCE_WAIT_SEC"}, Type: KindInt, Min: intp(0), Commands: []string{"fuzz", "gate"}},
+	{Key: "oracle.receipt_timeout", Env: []string{"RG_WEB3_RECEIPT_WAIT_SEC"}, Type: KindInt, Min: intp(1), Commands: []string{"gate"}},
+	{Key: "oracle.stall_sec", Env: []string{"RG_STALL_SEC"}, Type: KindInt, Min: intp(1), Commands: []string{"fuzz", "gate"}},
+	{Key: "oracle.stateroot_extra_urls", Env: []string{"RG_FUZZ_STATEROOT_URLS"}, Type: KindString, Commands: []string{"fuzz", "gate"}},
 
 	// ---- repo / tools ----
 	{Key: "repo.root", Env: []string{"FBT_REPO_ROOT"}, Type: KindPath},
-	{Key: "tools.build_dir", Env: []string{"BUILD_DIR"}, Type: KindPath},
-	{Key: "tools.console_dir", Env: []string{"CONSOLE_DIR"}, Type: KindPath},
-	{Key: "tools.fisco_bin", Env: []string{"FISCO_BIN"}, Type: KindPath},
-	{Key: "tools.fuzz_jar", Env: []string{"FUZZ_JAR"}, Legacy: []string{"TAMPER_FUZZ_JAR"}, Type: KindPath},
-	{Key: "tools.java_bin", Env: []string{"JAVA_BIN"}, Type: KindPath},
-	{Key: "tools.tamper_block_limit", Env: []string{"TAMPER_BLOCK_LIMIT"}, Type: KindInt, Min: intp(0)},
-	{Key: "tools.tamper_helper", Env: []string{"TAMPER_HELPER"}, Type: KindPath},
-	{Key: "tools.web3_private_key", Env: []string{"WEB3_PRIVATE_KEY"}, Type: KindString, Secret: true},
+	{Key: "tools.build_dir", Env: []string{"BUILD_DIR"}, Type: KindPath, Commands: []string{"cluster", "doctor"}},
+	{Key: "tools.console_dir", Env: []string{"CONSOLE_DIR"}, Type: KindPath, Commands: []string{"gate"}},
+	{Key: "tools.fisco_bin", Env: []string{"FISCO_BIN"}, Type: KindPath, Commands: []string{"cluster", "doctor", "gate"}},
+	{Key: "tools.fuzz_jar", Env: []string{"FUZZ_JAR"}, Legacy: []string{"TAMPER_FUZZ_JAR"}, Type: KindPath, Commands: []string{"fuzz", "gate"}},
+	{Key: "tools.java_bin", Env: []string{"JAVA_BIN"}, Type: KindPath, Commands: []string{"fuzz", "gate"}},
+	{Key: "tools.tamper_block_limit", Env: []string{"TAMPER_BLOCK_LIMIT"}, Type: KindInt, Min: intp(0), Commands: []string{"gate"}},
+	{Key: "tools.tamper_helper", Env: []string{"TAMPER_HELPER"}, Type: KindPath, Commands: []string{"gate"}},
+	{Key: "tools.web3_private_key", Env: []string{"WEB3_PRIVATE_KEY"}, Type: KindString, Secret: true, Commands: []string{"gate"}},
 
 	// ---- upgrade ----
-	{Key: "upgrade.rollback", Env: []string{"UPGRADE_ROLLBACK"}, Type: KindBool},
+	{Key: "upgrade.rollback", Env: []string{"UPGRADE_ROLLBACK"}, Type: KindBool, Commands: []string{"gate"}},
 
 	// ---- host-only run controls (spec §7.7): typed here so `run.timeout_sec: abc` is rejected
 	// with the same rigour as `fuzz.batch: abc`.

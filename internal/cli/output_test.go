@@ -144,3 +144,25 @@ func TestUnmarshallableDocumentIsAHostError(t *testing.T) {
 		t.Errorf("want ClassHost, got %v", c)
 	}
 }
+
+// Machine output must carry the literal characters, not \u escapes: consumers grep it, and
+// "<redacted>" arriving as an escape sequence hides the one value a reader most wants to confirm.
+func TestMachineOutputIsNotHTMLEscaped(t *testing.T) {
+	for _, mode := range []OutputMode{OutputJSON, OutputJSONL} {
+		var out bytes.Buffer
+		if err := render(&out, mode, map[string]string{
+			"secret": redacted, "url": "http://h/?a=1&b=2",
+		}, nil); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out.String(), redacted) {
+			t.Errorf("%v: %q does not contain the literal %q", mode, out.String(), redacted)
+		}
+		if strings.Contains(out.String(), "\\u00") {
+			t.Errorf("%v: output carries \\u escapes: %q", mode, out.String())
+		}
+		if !strings.Contains(out.String(), "a=1&b=2") {
+			t.Errorf("%v: the ampersand did not survive: %q", mode, out.String())
+		}
+	}
+}

@@ -239,3 +239,56 @@ func TestRangesAcceptTheEnginesOwnDefaults(t *testing.T) {
 		}
 	}
 }
+
+// Every command name a row claims must be one fbt actually has, or `config show --command gate`
+// silently omits a key some typo'd name was guarding.
+func TestRowCommandsAreAllRealCommands(t *testing.T) {
+	tagged := 0
+	for _, r := range Rows() {
+		for _, c := range r.Commands {
+			if !IsKnownCommand(c) {
+				t.Errorf("%s claims command %q, which fbt does not have", r.Key, c)
+			}
+		}
+		if len(r.Commands) > 0 {
+			tagged++
+		}
+	}
+	if tagged < 30 {
+		t.Fatalf("only %d rows carry a command surface -- the column is barely filled in", tagged)
+	}
+}
+
+// A key with no command list is needed everywhere; a filtered view that dropped those would tell
+// the user the engine runs without a repo root.
+func TestRowsForCommandKeepsUniversalKeysAndDropsForeignOnes(t *testing.T) {
+	has := func(rows []Row, key string) bool {
+		for _, r := range rows {
+			if r.Key == key {
+				return true
+			}
+		}
+		return false
+	}
+	gate := RowsForCommand("gate")
+	for _, k := range []string{"repo.root", "engine.scripts_dir", "cluster.group_id", "jsd.qps",
+		"oracle.stall_sec", "tools.web3_private_key"} {
+		if !has(gate, k) {
+			t.Errorf("gate's surface is missing %q", k)
+		}
+	}
+	for _, k := range []string{"fuzz.seed", "crypto.sm_mode"} {
+		if has(gate, k) {
+			t.Errorf("%q is not part of gate's surface", k)
+		}
+	}
+	if len(RowsForCommand("gate")) >= len(Rows()) {
+		t.Error("filtering by command returned everything -- the filter is not filtering")
+	}
+	// Every known command must yield a usable surface, not an empty one.
+	for _, c := range KnownCommands() {
+		if len(RowsForCommand(c)) == 0 {
+			t.Errorf("command %q has an empty key surface", c)
+		}
+	}
+}

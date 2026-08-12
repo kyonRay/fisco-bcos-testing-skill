@@ -89,20 +89,20 @@ func emitError(stdout, stderr io.Writer, mode OutputMode, err error) exitcode.Co
 // table would hand a --output jsonl caller unparseable text with exit code 0.
 func render(stdout io.Writer, mode OutputMode, doc interface{}, human func(io.Writer)) error {
 	switch mode {
-	case OutputJSON:
-		b, err := json.MarshalIndent(doc, "", "  ")
-		if err != nil {
+	case OutputJSON, OutputJSONL:
+		enc := json.NewEncoder(stdout)
+		// HTML escaping exists for JSON embedded in a web page. Here it only rewrites the angle
+		// brackets of "<redacted>" and the ampersands in URLs into \u escapes, making the output
+		// harder to read and to grep for no benefit.
+		enc.SetEscapeHTML(false)
+		if mode == OutputJSON {
+			enc.SetIndent("", "  ")
+		}
+		// Encode writes exactly one trailing newline, so a jsonl document is one line.
+		if err := enc.Encode(doc); err != nil {
 			return fbterr.Hostf("cannot encode the output document: %v", err)
 		}
-		_, err = fmt.Fprintf(stdout, "%s\n", b)
-		return err
-	case OutputJSONL:
-		b, err := json.Marshal(doc) // compact: exactly one line, so a reader can split on \n
-		if err != nil {
-			return fbterr.Hostf("cannot encode the output document: %v", err)
-		}
-		_, err = fmt.Fprintf(stdout, "%s\n", b)
-		return err
+		return nil
 	default:
 		if human != nil {
 			human(stdout)
