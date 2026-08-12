@@ -99,7 +99,7 @@ func gateRun(ctx context.Context, o GlobalOptions, args []string, stdout, stderr
 	if err != nil {
 		return emitError(stdout, stderr, o.Output, err)
 	}
-	if _, err := doctor.Check(plan, rt.Values, doctor.OSProbe{}); err != nil {
+	if _, err := doctor.CheckIn(rt.Exec.RepoRoot, plan, rt.Values, doctor.OSProbe{}); err != nil {
 		return emitError(stdout, stderr, o.Output, err)
 	}
 	// Every .case parses before anything starts, so one typo is a message rather than a failure

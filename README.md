@@ -117,6 +117,10 @@ fisco-bcos-release-gate/
 ├── SKILL.md                              the workflow Claude follows (entry point)
 ├── README.md                             this file
 ├── CLAUDE.md                             guidance for Claude Code editing this repo's own source
+├── install.sh                            build fbt and lay out an installation tree
+├── engine.json                           the engine's protocol/event/output versions + capabilities
+├── cmd/fbt/                              the Go CLI host (see "The fbt CLI" below)
+├── internal/                             the host's packages: config, runner, execution, clusters, cases, doctor
 ├── scripts/
 │   ├── apply_profile.sh                  replay a captured .profile onto a local AIR cluster
 │   ├── gate.sh                           orchestrator: bring up cluster, run scenarios, judge oracles
@@ -126,6 +130,9 @@ fisco-bcos-release-gate/
 │   ├── oracle_liveness.sh                consensus-halt oracle: block-height stall detection
 │   ├── oracle_stateroot.sh               state-mismatch oracle: stateRoot comparison across nodes
 │   ├── run_case.sh                       replay one scenarios/*.case regression fixture
+│   ├── event_lib.sh                      the engine half of the fd 3 event protocol
+│   ├── cluster_down.sh                   stop one cluster workspace (wraps the sibling stop_all.sh)
+│   ├── gate_upgrade.sh                   executable entry point for the T0-T8 upgrade timeline
 │   ├── failures_lib.sh                   local failures.jsonl sink (failures_append)
 │   ├── report_defects.sh                 sync unreported failures.jsonl rows to the Tencent smartsheet
 │   └── scenarios/                        the 4 general-purpose gate scenario families, + upgrade
@@ -150,6 +157,37 @@ fisco-bcos-release-gate/
 │   └── upgrade-path.md                   T0-T8 operational detail + how scenario_upgrade_run gets its args
 └── tests/                                bash unit tests (tests/assert.sh + tests/*_test.sh)
 ```
+
+---
+
+## The fbt CLI
+
+The same engine can be driven by a Go host, `fbt`, instead of by Claude reading SKILL.md. The
+scripts stay usable standalone -- every one of them runs under a plain shell with fd 3 closed, and
+the event protocol is a no-op there -- so this is an additional front end, not a replacement.
+
+```bash
+./install.sh --prefix ~/fbt          # builds bin/fbt and lays out libexec/ + share/
+~/fbt/bin/fbt doctor --command gate  # what this machine is missing, and whether it is 20 or 30
+~/fbt/bin/fbt plan -p production-enterprise   # what a run would do; starts nothing
+~/fbt/bin/fbt gate run -p production-enterprise
+~/fbt/bin/fbt cluster ls             # registered clusters; reclaims crash leftovers
+~/fbt/bin/fbt cluster down --run-id <id>
+```
+
+What the host adds over invoking the scripts by hand:
+
+- **One exit code with a fixed meaning**: 0 clean, 10 gate failure, 20 configuration, 30
+  infrastructure, 40 fbt's own bug, 130 cancelled. CI branches on these.
+- **Process-group teardown**: ^C or a deadline takes down the whole subtree, not just bash, so no
+  node, java or curl process is left holding a port.
+- **A cluster registry** under the state directory, so two runs cannot build chains on the same
+  fixed ports, and a crashed run's leftovers are reclaimed rather than blocking the machine
+  forever.
+- **`--output json` / `--output jsonl`** for every command, including every failure path.
+
+`fbt --help` lists the commands. The design is in `docs/2026-08-10-fbt-cli-kernel-design.md`,
+which is the single authority for the exit-code, event and configuration contracts.
 
 ---
 

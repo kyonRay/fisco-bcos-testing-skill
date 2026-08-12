@@ -55,7 +55,7 @@ func fuzzCommand(ctx context.Context, o GlobalOptions, args []string, stdout, st
 	if err != nil {
 		return emitError(stdout, stderr, o.Output, err)
 	}
-	if _, err := doctor.Check(plan, rt.Values, doctor.OSProbe{}); err != nil {
+	if _, err := doctor.CheckIn(rt.Exec.RepoRoot, plan, rt.Values, doctor.OSProbe{}); err != nil {
 		return emitError(stdout, stderr, o.Output, err)
 	}
 

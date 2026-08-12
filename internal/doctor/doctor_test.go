@@ -264,3 +264,61 @@ func TestBashVersionParsing(t *testing.T) {
 		}
 	}
 }
+
+// Several built-in defaults are RELATIVE -- tools.console_dir is "console/dist", mirroring the
+// engine's own ${CONSOLE_DIR:-console/dist} -- and the engine resolves those against ITS working
+// directory, the FISCO checkout. Checking them against the host's cwd reports "console/dist does
+// not exist" on a machine where the engine would find it immediately: a false red that refuses a
+// perfectly good run.
+func TestRelativePathsResolveAgainstTheEnginesWorkingDirectory(t *testing.T) {
+	plan := []Requirement{{Name: "console", Kind: KindPath, ConfigKey: "tools.console_dir", Why: "w"}}
+	cfg := map[string]string{"tools.console_dir": "console/dist"}
+	p := everything()
+	p.files["/repo/console/dist"] = true // it exists where the ENGINE will look
+
+	if _, err := CheckIn("/repo", plan, cfg, p); err != nil {
+		t.Errorf("a relative default was checked against the wrong base: %v", err)
+	}
+	// ...and it is still a real failure when it is genuinely absent under that base.
+	if _, err := CheckIn("/elsewhere", plan, cfg, p); err == nil {
+		t.Error("a path missing under the engine's cwd was accepted")
+	}
+	// An absolute value is never rebased.
+	abs := map[string]string{"tools.console_dir": "/opt/console"}
+	p.files["/opt/console"] = true
+	if _, err := CheckIn("/repo", plan, abs, p); err != nil {
+		t.Errorf("an absolute path was rebased: %v", err)
+	}
+	// "not configured" must stay 20, not become "configured, pointing at the base directory".
+	rep, err := CheckIn("/repo", plan, map[string]string{}, p)
+	if err == nil || rep.Deps[0].Class != "config" {
+		t.Errorf("an unset key with a base became %+v; it must still be a config error", rep.Deps[0])
+	}
+}
+
+// tools.java_bin defaults to "java", a COMMAND NAME. The engine runs ${JAVA_BIN:-java} through a
+// shell, which resolves it on PATH -- so treating it as a relative path and looking for
+// <repo>/java reports a missing dependency on every machine where java is installed normally.
+func TestABareCommandNameIsLookedUpOnPathNotUnderTheRepo(t *testing.T) {
+	plan := []Requirement{{Name: "java", Kind: KindPath, ConfigKey: "tools.java_bin", Why: "w"}}
+	p := everything()
+	p.path["java"] = true // on PATH, as a normal install puts it
+	// Nothing at /repo/java, deliberately.
+	if _, err := CheckIn("/repo", plan, map[string]string{"tools.java_bin": "java"}, p); err != nil {
+		t.Errorf("a bare command name was looked for under the repo: %v", err)
+	}
+	// Absent from PATH is still infra, with a message that says PATH rather than a path.
+	p.path["java"] = false
+	rep, err := CheckIn("/repo", plan, map[string]string{"tools.java_bin": "java"}, p)
+	if err == nil {
+		t.Fatal("java missing from PATH was accepted")
+	}
+	if !strings.Contains(rep.Deps[0].Detail, "not on PATH") {
+		t.Errorf("detail = %q", rep.Deps[0].Detail)
+	}
+	// A value that IS a path keeps the path treatment.
+	p.files["/opt/jdk/bin/java"] = true
+	if _, err := CheckIn("/repo", plan, map[string]string{"tools.java_bin": "/opt/jdk/bin/java"}, p); err != nil {
+		t.Errorf("an explicit path was not honoured: %v", err)
+	}
+}

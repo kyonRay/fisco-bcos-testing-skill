@@ -8,6 +8,7 @@ package doctor
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -223,7 +224,19 @@ func parseBashMajor(s string) int {
 
 // Check runs a plan and returns the report plus the error to fail with, or nil if everything the
 // command needs is present.
+//
+// base is the ENGINE's working directory. Several built-in defaults are relative -- tools.
+// console_dir is "console/dist", mirroring the engine's own ${CONSOLE_DIR:-console/dist} -- and
+// the engine resolves those against its own cwd, which is the FISCO checkout, not wherever the
+// user happened to type the command. Checking them against the host's cwd reports "console/dist
+// does not exist" on a machine where the engine would find it immediately: a false red that
+// refuses a perfectly good run.
 func Check(plan []Requirement, config map[string]string, p Probe) (Report, error) {
+	return CheckIn("", plan, config, p)
+}
+
+// CheckIn is Check with the engine's working directory supplied.
+func CheckIn(base string, plan []Requirement, config map[string]string, p Probe) (Report, error) {
 	rep := Report{Deps: make([]Finding, 0, len(plan))}
 	var missingConfig, missingInfra []string
 
@@ -254,7 +267,21 @@ func Check(plan []Requirement, config map[string]string, p Probe) (Report, error
 				missingConfig = append(missingConfig, f.Detail)
 			}
 		case KindPath:
-			v := config[r.ConfigKey]
+			raw := config[r.ConfigKey]
+			// A value with no separator is a COMMAND NAME, not a path. tools.java_bin defaults to
+			// "java", and the engine's ${JAVA_BIN:-java} is executed by a shell that resolves it on
+			// PATH -- so treating it as a relative path and looking for <repo>/java reports a
+			// missing dependency on every machine where java is installed normally.
+			if raw != "" && !strings.ContainsRune(raw, filepath.Separator) {
+				f.Present = p.LookPath(raw)
+				if !f.Present {
+					f.Class = "infra"
+					f.Detail = r.ConfigKey + " is " + raw + ", which is not on PATH"
+					missingInfra = append(missingInfra, f.Detail)
+				}
+				break
+			}
+			v := resolveAgainst(base, raw)
 			switch {
 			case v == "":
 				// Not configured at all: the user has to say where it is. That is their file to
@@ -293,6 +320,15 @@ func Check(plan []Requirement, config map[string]string, p Probe) (Report, error
 			len(missingConfig), strings.Join(missingConfig, "\n  - "))
 	}
 	return rep, nil
+}
+
+// resolveAgainst makes a relative configured path absolute against the engine's working directory.
+// An empty value stays empty: "not configured" must not turn into "configured, pointing at base".
+func resolveAgainst(base, v string) string {
+	if v == "" || base == "" || filepath.IsAbs(v) {
+		return v
+	}
+	return filepath.Join(base, v)
 }
 
 func itoa(n int) string {

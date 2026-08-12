@@ -44,7 +44,7 @@ func doctorCommand(_ context.Context, o GlobalOptions, args []string, stdout, st
 		return emitError(stdout, stderr, o.Output, err)
 	}
 
-	report, checkErr := doctor.Check(plan, rt.Values, doctor.OSProbe{})
+	report, checkErr := doctor.CheckIn(rt.Exec.RepoRoot, plan, rt.Values, doctor.OSProbe{})
 	if renderErr := render(stdout, o.Output, report, func(w io.Writer) {
 		if len(report.Deps) == 0 {
 			fmt.Fprintf(w, "%s needs nothing checked.\n", command)
