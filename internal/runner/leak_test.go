@@ -1,11 +1,10 @@
 package runner
 
 import (
+	"context"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -22,37 +21,36 @@ func TestAGroupMemberThatIgnoresTermIsStillKilled(t *testing.T) {
 	if err := os.WriteFile(stubborn, []byte("#!/usr/bin/env bash\ntrap '' TERM\nsleep 60\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	start := time.Now()
-	_, err := run(t, Spec{
-		// The leader exits promptly on TERM; the child it started does not.
-		Script:    script(t, stubborn+" &\necho $! > "+pidFile+"\nwait\n"),
-		Timeout:   startupSlack,
-		KillGrace: time.Second,
-	})
-	if err != nil {
+	// Cancellation rather than a deadline, for the reason spelled out on
+	// TestTeardownKillsTheWholeProcessGroupNotJustBash: a wall-clock deadline races the script's
+	// own startup, and firing before the pid is recorded makes the test assert against a process
+	// that never existed.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := Run(ctx, Spec{
+			// The leader exits promptly on TERM; the child it started does not.
+			Script: script(t, stubborn+" &\necho $! > "+pidFile+".tmp\nmv "+pidFile+".tmp "+
+				pidFile+"\nwait\n"),
+			Dir:       dir,
+			Timeout:   60 * time.Second,
+			KillGrace: time.Second,
+		})
+		done <- err
+	}()
+
+	pid := waitForPID(t, pidFile)
+	cancelledAt := time.Now()
+	cancel()
+	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	if elapsed := time.Since(start); elapsed > startupSlack+DrainGrace+8*time.Second {
-		t.Fatalf("Run took %v", elapsed)
+	if since := time.Since(cancelledAt); since > DrainGrace+15*time.Second {
+		t.Fatalf("Run took %v after the cancellation", since)
 	}
-	raw, err := os.ReadFile(pidFile)
-	if err != nil {
-		t.Fatalf("the stubborn child never recorded its pid: %v", err)
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if syscall.Kill(pid, 0) != nil {
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	_ = syscall.Kill(pid, syscall.SIGKILL)
-	t.Errorf("process %d ignored TERM and survived: the host returned as soon as the leader died, "+
-		"so the grace period never ended in KILL(-pgid)", pid)
+	assertReaped(t, pid, "process %d ignored TERM and survived: the host returned as soon as the "+
+		"leader died, so the grace period never ended in KILL(-pgid)")
 }
 
 // Non-interactive bash SOURCES $BASH_ENV before running the script. A file left there runs ahead of

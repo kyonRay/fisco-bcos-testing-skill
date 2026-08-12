@@ -213,47 +213,92 @@ func TestTimeoutIsReportedAsTimeoutNotAsASignalDeath(t *testing.T) {
 }
 
 // spec §10: kill the whole process group, or Java, curl and node processes survive as orphans.
-func TestTimeoutKillsTheWholeProcessGroupNotJustBash(t *testing.T) {
+//
+// The teardown is triggered by CANCELLATION rather than a deadline, and that is deliberate: both
+// paths call the same terminateGroup, but a deadline is a wall-clock race against process startup.
+// An earlier version fired at 2s and went red under a loaded machine because the script had not yet
+// reached the line that records its child's pid -- the test was then asserting against a process
+// that never existed. Waiting for the child to actually be there and only then pulling the trigger
+// removes the race instead of enlarging the constant. The deadline's own job -- bounding the run --
+// is covered by TestTimeoutIsReportedAsTimeoutNotAsASignalDeath.
+func TestTeardownKillsTheWholeProcessGroupNotJustBash(t *testing.T) {
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "child.pid")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	type outcome struct {
+		res     Result
+		err     error
+		elapsed time.Duration
+	}
+	done := make(chan outcome, 1)
 	start := time.Now()
-	_, err := run(t, Spec{
-		Script: script(t, `
+	go func() {
+		res, err := Run(ctx, Spec{
+			Script: script(t, `
 sleep 30 &
-echo $! > `+pidFile+`
+echo $! > `+pidFile+`.tmp
+mv `+pidFile+`.tmp `+pidFile+`
 wait
 `),
-		Timeout: startupSlack,
-	})
-	if err != nil {
-		t.Fatal(err)
+			Dir:     dir,
+			Timeout: 60 * time.Second,
+		})
+		done <- outcome{res, err, time.Since(start)}
+	}()
+
+	pid := waitForPID(t, pidFile)
+	cancelledAt := time.Now()
+	cancel()
+
+	got := <-done
+	if got.err != nil {
+		t.Fatal(got.err)
 	}
 	// Returning promptly is half the contract, and the half that catches the subtler bug: when
 	// only bash is signalled, the orphaned `sleep` keeps the stdout write end open, Run blocks
 	// until it exits on its own 30s later, and by then the liveness check below passes for the
-	// wrong reason. Without this assertion the test goes green against a runner whose deadline
+	// wrong reason. Without this assertion the test goes green against a runner whose teardown
 	// does not actually bound anything.
-	if elapsed := time.Since(start); elapsed > startupSlack+DrainGrace+3*time.Second {
-		t.Errorf("Run took %v; the deadline did not bound the run", elapsed)
+	if since := time.Since(cancelledAt); since > DrainGrace+8*time.Second {
+		t.Errorf("Run took %v after the cancellation; the teardown did not bound the run", since)
 	}
-	raw, err := os.ReadFile(pidFile)
-	if err != nil {
-		t.Fatalf("the grandchild never recorded its pid: %v", err)
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Give the group kill a moment to land, then prove the grandchild is gone.
-	deadline := time.Now().Add(3 * time.Second)
+	assertReaped(t, pid, "grandchild %d survived the group kill -- only bash was signalled")
+}
+
+// waitForPID blocks until the script has recorded its child's pid. The file is written under a
+// temporary name and renamed, so a partially written file can never be read as a pid.
+func waitForPID(t *testing.T, path string) int {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		if syscall.Kill(pid, 0) != nil {
-			return // reaped
+		raw, err := os.ReadFile(path)
+		if err == nil {
+			pid, convErr := strconv.Atoi(strings.TrimSpace(string(raw)))
+			if convErr == nil && pid > 0 {
+				return pid
+			}
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	_ = syscall.Kill(pid, syscall.SIGKILL) // do not leak it out of the test either
-	t.Errorf("grandchild %d survived the group kill -- only bash was signalled", pid)
+	t.Fatalf("the child never recorded its pid at %s within 30s", path)
+	return 0
+}
+
+// assertReaped waits for a process to disappear, then reports it with the caller's message if it
+// is still there. It KILLs a survivor so a failing test does not leak a process either.
+func assertReaped(t *testing.T, pid int, format string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if syscall.Kill(pid, 0) != nil {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	_ = syscall.Kill(pid, syscall.SIGKILL)
+	t.Errorf(format, pid)
 }
 
 // A process that ignores TERM must still die: the grace period ends in KILL.
