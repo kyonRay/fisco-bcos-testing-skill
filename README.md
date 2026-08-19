@@ -169,10 +169,13 @@ the event protocol is a no-op there -- so this is an additional front end, not a
 ```bash
 ./install.sh --prefix ~/fbt          # builds bin/fbt and lays out libexec/ + share/
 ~/fbt/bin/fbt doctor --command gate  # what this machine is missing, and whether it is 20 or 30
-~/fbt/bin/fbt plan -p production-enterprise   # what a run would do; starts nothing
+~/fbt/bin/fbt gate plan -p production-enterprise  # what a run would do; starts nothing
 ~/fbt/bin/fbt gate run -p production-enterprise
+
+~/fbt/bin/fbt cluster up -p production-enterprise # build a chain and LEAVE it running
 ~/fbt/bin/fbt cluster ls             # registered clusters; reclaims crash leftovers
 ~/fbt/bin/fbt cluster down --run-id <id>
+~/fbt/bin/fbt fuzz run --attach <id> # fuzz the cluster `cluster up` left behind
 ```
 
 What the host adds over invoking the scripts by hand:

@@ -44,9 +44,11 @@ func decode(t *testing.T, s string) map[string]interface{} {
 // Only implemented commands are registered. A placeholder that answers nothing would still appear
 // in `fbt --help` and in shell completion, promising a command that does not exist.
 func TestRealTableRegistersOnlyImplementedCommands(t *testing.T) {
+	// plan and upgrade are NOT here: spec §6.3 puts them under `gate` (gate plan / gate upgrade),
+	// so they are subcommands rather than top-level entries.
 	want := map[string]bool{
-		"config": true, "profile": true, "doctor": true, "plan": true,
-		"case": true, "cluster": true, "gate": true, "fuzz": true, "upgrade": true,
+		"config": true, "profile": true, "doctor": true,
+		"case": true, "cluster": true, "gate": true, "fuzz": true,
 	}
 	for name := range commands {
 		if !want[name] {

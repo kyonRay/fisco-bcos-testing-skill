@@ -17,17 +17,27 @@ import (
 	"github.com/kyonRay/fisco-bcos-testing-skill/internal/fbterr"
 )
 
-func init() {
-	commands["gate"] = gateCommand
-	commands["plan"] = planCommand
-}
+func init() { commands["gate"] = gateCommand }
 
+// gateCommand routes the three things you can do with a gate: run one, print what one WOULD do,
+// and drive the upgrade timeline. They live under `gate` rather than at the top level (spec §6.3)
+// because all three take the same profile and produce a verdict about the same chain; `fbt plan`
+// on its own said nothing about what it was planning.
 func gateCommand(ctx context.Context, o GlobalOptions, args []string, stdout, stderr io.Writer) exitcode.Code {
-	if len(args) == 0 || args[0] != "run" {
+	if len(args) == 0 {
 		return emitError(stdout, stderr, o.Output,
-			fbterr.Configf("gate takes one subcommand: run"))
+			fbterr.Configf("gate needs a subcommand: run, plan or upgrade"))
 	}
-	return gateRun(ctx, o, args[1:], stdout, stderr)
+	switch args[0] {
+	case "run":
+		return gateRun(ctx, o, args[1:], stdout, stderr)
+	case "plan":
+		return planCommand(ctx, o, args[1:], stdout, stderr)
+	case "upgrade":
+		return upgradeRun(ctx, o, args[1:], stdout, stderr)
+	}
+	return emitError(stdout, stderr, o.Output,
+		fbterr.Configf("unknown subcommand %q; gate takes run, plan or upgrade", args[0]))
 }
 
 // gateOptions are the flags shared by `gate run` and `plan`, so the plan is guaranteed to describe
@@ -38,6 +48,9 @@ type gateOptions struct {
 	failFast  bool
 	parallel  bool
 	skipCases bool
+	// withFuzz is spec §6.3's reserved flag. It exists so the name is CLAIMED and using it is an
+	// explicit refusal rather than "flag provided but not defined", which reads like a typo.
+	withFuzz bool
 }
 
 func (g *gateOptions) bind(fs *flag.FlagSet) {
@@ -47,6 +60,8 @@ func (g *gateOptions) bind(fs *flag.FlagSet) {
 	fs.BoolVar(&g.parallel, "allow-parallel", false,
 		"allow a second cluster, if its port ranges do not overlap")
 	fs.BoolVar(&g.skipCases, "no-cases", false, "run the scenarios only, skip the .case sweep")
+	fs.BoolVar(&g.withFuzz, "with-fuzz", false,
+		"reserved: fold a fuzz pass into the round (not implemented, returns 20)")
 }
 
 // GateDoc is spec §8's success document. UI and CI build against this shape.
@@ -91,6 +106,11 @@ func gateRun(ctx context.Context, o GlobalOptions, args []string, stdout, stderr
 	if err != nil {
 		return emitError(stdout, stderr, o.Output, err)
 	}
+	if g.withFuzz {
+		return emitError(stdout, stderr, o.Output, fbterr.Configf(
+			"--with-fuzz is reserved and not implemented; run the fuzz pass separately with "+
+				"`fbt cluster up` followed by `fbt fuzz run --attach <run-id>`"))
+	}
 	selected := splitList(g.scenarios)
 
 	// 1. Everything that can be refused without side effects, refused first. Each of these leaves
@@ -114,6 +134,12 @@ func gateRun(ctx context.Context, o GlobalOptions, args []string, stdout, stderr
 	}
 	ports, err := derivePorts(rt.Values)
 	if err != nil {
+		return emitError(stdout, stderr, o.Output, err)
+	}
+	// The registry only knows the clusters fbt built, so ask the operating system about the rest.
+	// Skipping this cost ninety seconds and a 651MB binary copy before four nodes died on
+	// "Address already in use".
+	if err := clusters.CheckFree(ports); err != nil {
 		return emitError(stdout, stderr, o.Output, err)
 	}
 
@@ -301,7 +327,7 @@ func intValue(values map[string]string, key string, fallback int) (int, error) {
 	return n, nil
 }
 
-// PlanDoc is what `fbt plan` prints: everything the run would do, with nothing started.
+// PlanDoc is what `fbt gate plan` prints: everything the run would do, with nothing started.
 type PlanDoc struct {
 	Profile   string               `json:"profile"`
 	Scenarios []string             `json:"scenarios"`
@@ -323,7 +349,7 @@ type planCase struct {
 // question people actually bring to it -- "why isn't my fixture being tested" -- which is the
 // question a status field silently answers wrong when nobody can see it.
 func planCommand(_ context.Context, o GlobalOptions, args []string, stdout, stderr io.Writer) exitcode.Code {
-	fs := flag.NewFlagSet("plan", flag.ContinueOnError)
+	fs := flag.NewFlagSet("gate plan", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	finish := RegisterGlobalFlags(fs, &o)
 	var g gateOptions

@@ -10,12 +10,10 @@ import (
 	"github.com/kyonRay/fisco-bcos-testing-skill/internal/execution"
 	"github.com/kyonRay/fisco-bcos-testing-skill/internal/exitcode"
 	"github.com/kyonRay/fisco-bcos-testing-skill/internal/fbterr"
+	"github.com/kyonRay/fisco-bcos-testing-skill/internal/keys"
 )
 
-func init() {
-	commands["fuzz"] = fuzzCommand
-	commands["upgrade"] = upgradeCommand
-}
+func init() { commands["fuzz"] = fuzzCommand }
 
 type runDoc struct {
 	Exit    int    `json:"exit"`
@@ -33,11 +31,15 @@ func fuzzCommand(ctx context.Context, o GlobalOptions, args []string, stdout, st
 	fs.SetOutput(io.Discard)
 	finish := RegisterGlobalFlags(fs, &o)
 	var seed, iters, batch int
-	var attach string
+	var attach, transport, strategy, restartCmd string
 	fs.IntVar(&seed, "seed", 0, "random seed (0 lets the engine choose)")
 	fs.IntVar(&iters, "iters", 0, "iterations (0 uses the engine's default)")
 	fs.IntVar(&batch, "batch", 0, "batch size (0 uses the engine's default)")
 	fs.StringVar(&attach, "attach", "", "run against an already-registered cluster's run id")
+	fs.StringVar(&transport, "transport", "", "which RPC surface to fuzz: bcos|web3|web3method")
+	fs.StringVar(&strategy, "strategy", "", "mutation strategy: struct|bytes|both")
+	fs.StringVar(&restartCmd, "restart-cmd", "",
+		"command the driver runs to bring a crashed node back, so a run survives the crash it found")
 	if err := fs.Parse(args[1:]); err != nil {
 		return emitError(stdout, stderr, o.Output, fbterr.Configf("%v", err))
 	}
@@ -65,6 +67,22 @@ func fuzzCommand(ctx context.Context, o GlobalOptions, args []string, stdout, st
 		if v > 0 {
 			cfg[k] = fmt.Sprint(v)
 		}
+	}
+	// Validated through the key registry rather than against a list written out here. The registry
+	// already owns these vocabularies (fuzz.transport is bcos|web3|web3method, fuzz.strategy is
+	// struct|bytes|both); a second copy in the flag layer is one that drifts. Injecting straight
+	// into cfg happens AFTER the merge, so it skips the validation every other layer gets -- which
+	// would hand the engine RG_FUZZ_TRANSPORT=banana and let it fail somewhere less obvious.
+	for _, kv := range []struct{ key, value string }{
+		{"fuzz.transport", transport}, {"fuzz.strategy", strategy}, {"fuzz.restart_cmd", restartCmd},
+	} {
+		if kv.value == "" {
+			continue
+		}
+		if err := keys.Validate(kv.key, kv.value); err != nil {
+			return emitError(stdout, stderr, o.Output, err)
+		}
+		cfg[kv.key] = kv.value
 	}
 
 	// A fuzz run writes the cases it distils, so it needs a workspace even when it attaches to
@@ -94,16 +112,14 @@ func fuzzCommand(ctx context.Context, o GlobalOptions, args []string, stdout, st
 	return finishRun(rt, res, "fuzz", stdout, stderr, o)
 }
 
-// upgradeCommand drives the T0-T8 version-upgrade timeline.
+// upgradeRun drives the T0-T8 version-upgrade timeline. Reached as `fbt gate upgrade`.
 //
-// It is a separate command rather than a gate scenario because gate.sh's dispatch loop calls every
-// registered scenario with no arguments and this one needs four -- which is exactly why
-// gate_upgrade.sh exists as its own entry point.
-func upgradeCommand(ctx context.Context, o GlobalOptions, args []string, stdout, stderr io.Writer) exitcode.Code {
-	if len(args) == 0 || args[0] != "run" {
-		return emitError(stdout, stderr, o.Output, fbterr.Configf("upgrade takes one subcommand: run"))
-	}
-	fs := flag.NewFlagSet("upgrade run", flag.ContinueOnError)
+// It is not a gate SCENARIO because gate.sh's dispatch loop calls every registered scenario with
+// no arguments and this one needs four -- which is exactly why gate_upgrade.sh exists as its own
+// entry point. It is still a gate subcommand: it judges the same chain and returns the same
+// verdict vocabulary.
+func upgradeRun(ctx context.Context, o GlobalOptions, args []string, stdout, stderr io.Writer) exitcode.Code {
+	fs := flag.NewFlagSet("gate upgrade", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	finish := RegisterGlobalFlags(fs, &o)
 	var profileSpec, oldBin, newBin, targetVer string
@@ -113,7 +129,7 @@ func upgradeCommand(ctx context.Context, o GlobalOptions, args []string, stdout,
 	fs.StringVar(&newBin, "new-bin", "", "the release candidate rolled in during T2-T4")
 	fs.StringVar(&targetVer, "target-ver", "", "the compatibility_version the T5 bump moves to")
 	fs.BoolVar(&dryRun, "dry-run", false, "print the resolved plan, touch no chain")
-	if err := fs.Parse(args[1:]); err != nil {
+	if err := fs.Parse(args); err != nil {
 		return emitError(stdout, stderr, o.Output, fbterr.Configf("%v", err))
 	}
 	if err := finish(); err != nil {

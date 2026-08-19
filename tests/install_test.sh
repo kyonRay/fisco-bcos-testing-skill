@@ -66,8 +66,8 @@ assert_contains "$out" "production-enterprise" "the installed fbt reads the inst
 
 # The engine entry points really run under the installed layout. gate.sh's dry run resolves the
 # profile, sources every scenario family and prints its plan -- which is the whole layout at once.
-out="$("$FBT" --state-dir "$tmp/state" plan -p production-enterprise 2>&1)"
-assert_contains "$out" "ut, dual_rpc, malformed, jsd" "plan resolves against the installed tree"
+out="$("$FBT" --state-dir "$tmp/state" gate plan -p production-enterprise 2>&1)"
+assert_contains "$out" "ut, dual_rpc, malformed, jsd" "gate plan resolves against the installed tree"
 
 # ---- relocatable ----
 # paths.Resolve derives the install root from the binary's own location, so a finished tree must

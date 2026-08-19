@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"github.com/kyonRay/fisco-bcos-testing-skill/internal/fbterr"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -77,7 +78,11 @@ func gateFixture(t *testing.T, gateBody, caseBody string) (testinstall.Install, 
 		"  tamper_helper: "+filepath.Join(ti.Root, "tools/tamper.sh")+"\n"+
 		"  build_dir: "+filepath.Join(ti.Root, "build")+"\n"+
 		"  web3_private_key: '0xabc'\n"+
-		"jsd:\n  dir: "+filepath.Join(ti.Root, "jsd")+"\n")
+		"jsd:\n  dir: "+filepath.Join(ti.Root, "jsd")+"\n"+
+		// A band nothing realistic listens on. gate run and cluster up now bind-probe every port
+		// before reserving, so a fixture on build_chain's defaults would fail on any machine that
+		// happens to be running a chain -- which is the normal state of this project's own laptop.
+		"cluster:\n  p2p_base_port: 45300\n  bcos_base_port: 45200\n  web3_base_port: 45545\n")
 	return ti, []string{"--engine-dir", ti.Root, "--state-dir", ti.State, "--config", cfg}
 }
 
@@ -235,6 +240,25 @@ func TestAMalformedCaseIsRefusedBeforeTheEngineRuns(t *testing.T) {
 }
 
 // A cluster that is already active blocks a second run, and the message has to say how to clear it.
+// The registry only knows the clusters fbt built. Something else holding the port must be refused
+// BEFORE build_chain copies a 651MB binary and starts four nodes that then die on bind.
+func TestARunIsRefusedWhenSomethingElseAlreadyHoldsThePort(t *testing.T) {
+	_, flags := gateFixture(t, cleanGate, cleanCase)
+	l, err := net.Listen("tcp", ":45200") // the fixture's bcos base
+	if err != nil {
+		t.Skipf("cannot hold the probe port: %v", err)
+	}
+	defer func() { _ = l.Close() }()
+
+	code, _, errOut := runReal(t, append(flags, "gate", "run", "-p", "default-latest")...)
+	if code != exitcode.Infra {
+		t.Fatalf("code = %v, want 30", code)
+	}
+	if !strings.Contains(errOut, "45200") {
+		t.Errorf("stderr = %q; it must name the port that is taken", errOut)
+	}
+}
+
 func TestASecondRunIsRefusedWhileAClusterIsRegistered(t *testing.T) {
 	ti, flags := gateFixture(t, cleanGate, cleanCase)
 	// A registration whose node is this very test process, so it is unambiguously alive.
@@ -242,7 +266,7 @@ func TestASecondRunIsRefusedWhileAClusterIsRegistered(t *testing.T) {
 	if err := os.MkdirAll(regDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	entry := `{"run_id":"other","workspace":"/ws/other","ports":[{"name":"p2p","base":30300,"count":4}],
+	entry := `{"run_id":"other","workspace":"/ws/other","ports":[{"name":"p2p","base":45300,"count":4}],
 	  "nodes":[{"name":"node0","pid":` + itoa(os.Getpid()) + `}]}`
 	if err := os.WriteFile(filepath.Join(regDir, "other.json"), []byte(entry), 0o644); err != nil {
 		t.Fatal(err)
@@ -282,7 +306,7 @@ func TestPlanNamesTheSkippedCasesAndWhy(t *testing.T) {
 	writeCase(t, ti, "known.case", "pending")
 
 	code, out, errOut := runReal(t, append([]string{"--output", "json"},
-		append(flags, "plan", "-p", "default-latest")...)...)
+		append(flags, "gate", "plan", "-p", "default-latest")...)...)
 	if code != exitcode.OK {
 		t.Fatalf("code = %v (%s)", code, errOut)
 	}
@@ -313,7 +337,7 @@ func TestPlanTouchesNothing(t *testing.T) {
 	// Re-stub gate.sh so that RUNNING it leaves a trace this test can see.
 	stubEngine(t, ti, "touch "+marker+"\n", cleanCase)
 
-	if code, _, e := runReal(t, append(flags, "plan", "-p", "default-latest")...); code != exitcode.OK {
+	if code, _, e := runReal(t, append(flags, "gate", "plan", "-p", "default-latest")...); code != exitcode.OK {
 		t.Fatalf("code = %v (%s)", code, e)
 	}
 	if _, err := os.Stat(marker); err == nil {
@@ -374,8 +398,22 @@ func TestCaseListCountsWhatTheGateWillActuallyRun(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &doc); err != nil {
 		t.Fatal(err)
 	}
-	if len(doc.Cases) != 3 || doc.Swept != 1 || doc.Pending != 1 {
-		t.Errorf("doc = %+v; 3 cases, 1 swept, 1 pending", doc)
+	// --status defaults to active (spec §6.3), so only the active fixture is listed -- but the
+	// counts still describe every fixture on disk, or a pending defect disappears with the filter.
+	if len(doc.Cases) != 1 || doc.Swept != 1 || doc.Pending != 1 {
+		t.Errorf("doc = %+v; want 1 row listed, 1 swept, 1 pending out of 3 on disk", doc)
+	}
+	code, out, e = runReal(t, append([]string{"--output", "json"},
+		append(flags, "case", "list", "--status", "all")...)...)
+	if code != exitcode.OK {
+		t.Fatalf("--status all: code = %v (%s)", code, e)
+	}
+	doc = caseListDoc{}
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Cases) != 3 {
+		t.Errorf("--status all listed %d rows, want all 3", len(doc.Cases))
 	}
 }
 
@@ -386,7 +424,7 @@ func TestClusterLsReportsWhatItReclaimed(t *testing.T) {
 		t.Fatal(err)
 	}
 	// pid 2^22-1 is above every real pid on Linux and macOS, so this entry is unambiguously stale.
-	dead := `{"run_id":"dead","workspace":"/ws/dead","ports":[{"name":"p2p","base":30300,"count":4}],
+	dead := `{"run_id":"dead","workspace":"/ws/dead","ports":[{"name":"p2p","base":45300,"count":4}],
 	  "nodes":[{"name":"node0","pid":4194303}]}`
 	if err := os.WriteFile(filepath.Join(regDir, "dead.json"), []byte(dead), 0o644); err != nil {
 		t.Fatal(err)

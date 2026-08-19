@@ -7,6 +7,7 @@ import (
 	"io"
 
 	"github.com/kyonRay/fisco-bcos-testing-skill/internal/cases"
+	"github.com/kyonRay/fisco-bcos-testing-skill/internal/clusters"
 	"github.com/kyonRay/fisco-bcos-testing-skill/internal/execution"
 	"github.com/kyonRay/fisco-bcos-testing-skill/internal/exitcode"
 	"github.com/kyonRay/fisco-bcos-testing-skill/internal/fbterr"
@@ -30,9 +31,32 @@ func caseCommand(ctx context.Context, o GlobalOptions, args []string, stdout, st
 }
 
 type caseListDoc struct {
-	Cases   []cases.Case `json:"cases"`
-	Swept   int          `json:"swept"`
-	Pending int          `json:"pending"`
+	Cases  []cases.Case `json:"cases"`
+	Filter string       `json:"filter"`
+	// Swept and Pending count every fixture on disk, not the filtered rows. A consumer reading
+	// `--status active` output still has to be able to see that three pending defects exist.
+	Swept   int `json:"swept"`
+	Pending int `json:"pending"`
+}
+
+// filterByStatus narrows the listing. "all" is spelled out rather than being the default: spec
+// §6.3 defaults to active, because the everyday question is "what will the gate actually run".
+func filterByStatus(all []cases.Case, status string) ([]cases.Case, error) {
+	if status == "all" {
+		return all, nil
+	}
+	switch cases.Status(status) {
+	case cases.StatusActive, cases.StatusPending, cases.StatusExample:
+	default:
+		return nil, fbterr.Configf("unknown --status %q; use active, pending, example or all", status)
+	}
+	out := make([]cases.Case, 0, len(all))
+	for _, c := range all {
+		if string(c.Status) == status {
+			out = append(out, c)
+		}
+	}
+	return out, nil
 }
 
 // caseList shows every fixture and, crucially, which ones the gate will actually run.
@@ -43,6 +67,9 @@ func caseList(o GlobalOptions, args []string, stdout, stderr io.Writer) exitcode
 	fs := flag.NewFlagSet("case list", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	finish := RegisterGlobalFlags(fs, &o)
+	var status string
+	fs.StringVar(&status, "status", string(cases.StatusActive),
+		"which fixtures to list: active|pending|example|all")
 	if err := fs.Parse(args); err != nil {
 		return emitError(stdout, stderr, o.Output, fbterr.Configf("%v", err))
 	}
@@ -57,20 +84,28 @@ func caseList(o GlobalOptions, args []string, stdout, stderr io.Writer) exitcode
 	if err != nil {
 		return emitError(stdout, stderr, o.Output, err)
 	}
+	shown, err := filterByStatus(all, status)
+	if err != nil {
+		return emitError(stdout, stderr, o.Output, err)
+	}
 
-	doc := caseListDoc{Cases: all, Swept: len(cases.Sweep(all))}
+	// Swept and Pending are counted over ALL fixtures, never over the filtered view. The default
+	// filter is active, and a pending fixture is a known unfixed defect that no gate round will
+	// ever report -- letting the filter hide it from the count is how it gets forgotten.
+	doc := caseListDoc{Cases: shown, Swept: len(cases.Sweep(all)), Filter: status}
 	for _, c := range all {
 		if c.Status == cases.StatusPending {
 			doc.Pending++
 		}
 	}
 	if err := render(stdout, o.Output, doc, func(w io.Writer) {
-		for _, c := range all {
+		for _, c := range shown {
 			fmt.Fprintf(w, "%-24s %-8s %-8s %-20s %s\n",
 				c.Name, c.Status, c.Expect, c.Profile, c.Source)
 		}
-		fmt.Fprintf(w, "\n%d case(s): %d swept by the gate, %d pending (a known defect nobody's "+
-			"round will report)\n", len(all), doc.Swept, doc.Pending)
+		fmt.Fprintf(w, "\nshowing %d of %d case(s) [--status %s]: %d swept by the gate, "+
+			"%d pending (a known defect nobody's round will report)\n",
+			len(shown), len(all), status, doc.Swept, doc.Pending)
 	}); err != nil {
 		return emitError(stdout, stderr, o.Output, err)
 	}
@@ -120,11 +155,35 @@ func caseRun(ctx context.Context, o GlobalOptions, args []string, stdout, stderr
 	if dryRun {
 		cmdArgs = append(cmdArgs, "--dry-run")
 	} else {
+		// run_case.sh calls apply_profile.sh, so a replay builds a chain of its own -- and a chain
+		// needs the same port discipline as any other. Without this, `case run` was the one command
+		// that could quietly collide with a cluster `cluster up` had left running.
+		ports, err := derivePorts(rt.Values)
+		if err != nil {
+			return emitError(stdout, stderr, o.Output, err)
+		}
+		if err := clusters.CheckFree(ports); err != nil {
+			return emitError(stdout, stderr, o.Output, err)
+		}
+		if _, err := rt.Registry.Reclaim(); err != nil {
+			return emitError(stdout, stderr, o.Output, err)
+		}
 		// A dry run builds nothing, so giving it a workspace would leave an empty run directory
 		// behind for every plan someone printed.
 		if err := rt.begin(map[string]interface{}{"case": c.Name}); err != nil {
 			return emitError(stdout, stderr, o.Output, err)
 		}
+		if _, err := rt.Registry.Reserve(clusters.Entry{
+			RunID:     rt.Norm.RunID,
+			Workspace: rt.Workspace.Cluster,
+			Profile:   c.Profile,
+			Ports:     ports,
+		}, false); err != nil {
+			return rt.fail(stdout, stderr, o.Output, err)
+		}
+		// run_case.sh tears its own cluster down, but only the host knows the run id the entry is
+		// filed under -- same split as gate run.
+		defer func() { _ = rt.Registry.Release(rt.Norm.RunID) }()
 		cmdArgs = append(cmdArgs, "-o", rt.Workspace.Cluster)
 	}
 
