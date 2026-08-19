@@ -110,6 +110,21 @@ var matrix = map[string][]Requirement{
 		{Name: "repo", Kind: KindPath, ConfigKey: "repo.root", Why: "a case reproduces a profile locally"},
 		{Name: "node-binary", Kind: KindPath, ConfigKey: "tools.fisco_bin", Why: "the binary under test"},
 	},
+	// Bringing a cluster up runs the whole of apply_profile.sh: build_chain, the config.ini patch,
+	// and the console replay of every [system_config_replay] pair. It is the gate list minus the
+	// scenario-specific entries -- no scenario runs here, so Viem, the tamper helper and the UT
+	// binaries are none of its business.
+	"cluster-up": {
+		{Name: "bash4", Kind: KindBashVersion, Why: "apply_profile.sh uses associative arrays"},
+		{Name: "curl", Kind: KindExecutable, Exe: "curl", Why: "bring-up waits for RPC to answer"},
+		{Name: "repo", Kind: KindPath, ConfigKey: "repo.root",
+			Why: "build_chain.sh lives in the checkout"},
+		{Name: "node-binary", Kind: KindPath, ConfigKey: "tools.fisco_bin",
+			Why: "the fisco-bcos binary the cluster runs"},
+		{Name: "console", Kind: KindPath, ConfigKey: "tools.console_dir",
+			Why: "the profile's setSystemConfigByKey replay goes through console.sh"},
+		{Name: "java", Kind: KindPath, ConfigKey: "tools.java_bin", Why: "the console is a JVM program"},
+	},
 	// Teardown and inspection check NOTHING. Spec §5 is explicit: never refuse to stop a cluster
 	// because java or Viem is missing. A half-installed machine with a stuck cluster is precisely
 	// the situation where `cluster down` has to work.
