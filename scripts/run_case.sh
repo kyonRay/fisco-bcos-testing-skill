@@ -239,6 +239,7 @@ NODE_DIR="$CLUSTER_OUTDIR_ABS/127.0.0.1"
 # (unlike gate.sh, which still reads PROFILE_GENESIS[compatibility_version] for its own log
 # lines), so profile_lib.sh/profile_load are deliberately NOT sourced here.
 source "$SCRIPT_DIR/oracle_lib.sh"
+source "$SCRIPT_DIR/failures_lib.sh"
 RPC_URL="$(_primary_web3_url "$NODE_DIR")" || {
     event_set_outcome infra_error
     echo "ERROR: run_case: could not derive the primary Web3 RPC URL from $NODE_DIR/node0/config.ini" >&2
@@ -275,12 +276,33 @@ rpc_current_height() {
     printf '%d\n' "$hex"
 }
 
+# Every trip goes into the same local sink gate.sh writes, <cluster_outdir>/failures.jsonl.
+# Without this a replay that reproduced a real crash -- three oracles tripping, the node gone --
+# left no record anywhere but the terminal, which is the one place nobody reads afterwards. The
+# flywheel's whole claim is that a confirmed defect becomes a durable artifact; a fixture that
+# fires and records nothing breaks that at the last step.
+_case_record() {
+    # The version field is "unknown" rather than the profile's compatibility_version: run_case.sh
+    # deliberately does not source profile_lib.sh (see the note above RPC_URL), and sourcing it for
+    # one log field would pull the whole PROFILE_* machinery in behind it. The repro command and the
+    # evidence directory carry what an investigator actually needs.
+    failures_append "$CLUSTER_OUTDIR_ABS" "$(basename "$CASE_PROFILE")" \
+        "case:$(basename "$CASE_PATH")" "$1" "高" "$2" \
+        "bash $SCRIPT_DIR/run_case.sh $CASE_PATH" "$NODE_DIR" "unknown"
+}
+
 echo ">> [3/3] oracle sweep (needs live chain) — all three always run; a trip is a FAIL under either expect_oracle value (see case_verdict)"
 crash_tripped=0
-bash "$SCRIPT_DIR/oracle_crash.sh" --once "${node_pids[@]}" || crash_tripped=1
+if ! bash "$SCRIPT_DIR/oracle_crash.sh" --once "${node_pids[@]}"; then
+    crash_tripped=1
+    _case_record crash "oracle_crash tripped replaying $(basename "$CASE_PATH")"
+fi
 
 liveness_tripped=0
-bash "$SCRIPT_DIR/oracle_liveness.sh" -r "$RPC_URL" || liveness_tripped=1
+if ! bash "$SCRIPT_DIR/oracle_liveness.sh" -r "$RPC_URL"; then
+    liveness_tripped=1
+    _case_record halt "oracle_liveness tripped replaying $(basename "$CASE_PATH")"
+fi
 
 stateroot_tripped=0
 height="$(rpc_current_height)"
@@ -302,6 +324,7 @@ else
         exit 1
     elif [[ "$sr_rc" == 1 ]]; then
         stateroot_tripped=1
+        _case_record state-mismatch "oracle_stateroot tripped at height $height replaying $(basename "$CASE_PATH")"
     fi
 fi
 

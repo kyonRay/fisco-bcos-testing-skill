@@ -18,7 +18,7 @@ trap 'rm -rf "$WORK"; kill %1 2>/dev/null || true' EXIT
 # needs a chain. The verdict logic under test is the real one.
 ENG="$WORK/scripts"
 mkdir -p "$ENG"
-for f in run_case.sh event_lib.sh oracle_lib.sh profile_lib.sh; do cp "$REPO/scripts/$f" "$ENG/"; done
+for f in run_case.sh event_lib.sh oracle_lib.sh profile_lib.sh failures_lib.sh; do cp "$REPO/scripts/$f" "$ENG/"; done
 cp -r "$REPO/profiles" "$WORK/profiles"
 
 # The stub lays out just enough of a cluster for the real code to read: node0's config.ini is where
@@ -69,6 +69,27 @@ assert_contains "$ev" '"outcome":"gate_fail"' \
     "a failing case is gate_fail (10, the chain failed), not engine_error (40, fbt is broken)"
 assert_not_contains "$ev" '"outcome":"engine_error"' \
     "...and never reports the HOST as broken for a fixture that did its job"
+
+# ---- a trip is recorded to the same sink gate.sh writes ----
+# A replay that reproduced a real crash used to leave no record anywhere but the terminal: only
+# gate.sh sourced failures_lib.sh. The flywheel claims a confirmed defect becomes a durable
+# artifact, and a fixture that fires and records nothing breaks that at the last step.
+printf '#!/usr/bin/env bash\nexit 1\n' > "$ENG/oracle_crash.sh"   # trip it
+chmod +x "$ENG/oracle_crash.sh"
+OUT2="$WORK/cluster2"; mkdir -p "$OUT2/127.0.0.1"
+cp "$OUT/127.0.0.1/stop_all.sh" "$OUT2/127.0.0.1/"
+bash -c "exec -a '$OUT2/127.0.0.1/node0/fisco-bcos' sleep 60" &
+sleep 0.3
+FBT_ENGINE_SCRIPTS="$ENG" FBT_PROFILE_DIR="$WORK/profiles" RG_ONCE_WAIT_SEC=1 \
+    bash "$ENG/run_case.sh" "$WORK/failing.case" -o "$OUT2" 3>/dev/null >/dev/null 2>&1 || true
+assert_eq "0" "$([[ -f "$OUT2/failures.jsonl" ]] && echo 0 || echo 1)" \
+    "an oracle trip during a replay lands in failures.jsonl"
+assert_contains "$(cat "$OUT2/failures.jsonl" 2>/dev/null || echo)" '"scenario":"case:failing.case"' \
+    "...attributed to the case that produced it, not to a scenario"
+
+# restore the non-tripping oracle for the checks below
+printf '#!/usr/bin/env bash\nexit 0\n' > "$ENG/oracle_crash.sh"
+chmod +x "$ENG/oracle_crash.sh"
 
 # ---- the machine's fault is infra_error (30), not the host's (40) ----
 # Same sweep gate.sh got: run_case.sh's failure exits all fell through to the rc fallback, so a
