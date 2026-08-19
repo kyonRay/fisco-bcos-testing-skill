@@ -176,6 +176,9 @@ the event protocol is a no-op there -- so this is an additional front end, not a
 ~/fbt/bin/fbt cluster ls             # registered clusters; reclaims crash leftovers
 ~/fbt/bin/fbt cluster down --run-id <id>
 ~/fbt/bin/fbt fuzz run --attach <id> # fuzz the cluster `cluster up` left behind
+
+~/fbt/bin/fbt report                 # what the last run did, and what it recorded
+~/fbt/bin/fbt report --list          # every run that left a transcript, newest first
 ```
 
 What the host adds over invoking the scripts by hand:

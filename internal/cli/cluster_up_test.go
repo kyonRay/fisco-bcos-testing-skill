@@ -99,3 +99,73 @@ func TestPlanAndUpgradeAreReachableOnlyUnderGate(t *testing.T) {
 		t.Errorf("`gate plan` returned %v (%s)", code, e)
 	}
 }
+
+// A run must leave a durable account of itself. Before this the events lived only in memory and
+// evaporated when the process exited, unless the operator happened to pick --output jsonl AND
+// redirect it -- so `fbt report` had nothing to read and a four-minute round that built a chain
+// left no record at all.
+func TestARunWritesItsOwnTranscript(t *testing.T) {
+	ti, flags := gateFixture(t, cleanGate, cleanCase)
+	writeCase(t, ti, "live.case", "active")
+
+	code, out, e := runReal(t, append([]string{"--output", "json"},
+		append(flags, "gate", "run", "-p", "default-latest")...)...)
+	if code != exitcode.OK {
+		t.Fatalf("code = %v (%s)", code, e)
+	}
+	var doc GateDoc
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(filepath.Join(doc.Workspace, "events.jsonl"))
+	if err != nil {
+		t.Fatalf("the run left no transcript: %v", err)
+	}
+	for _, want := range []string{`"ev":"run_started"`, `"ev":"scenario_finished"`, `"ev":"run_finished"`} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("transcript is missing %s:\n%s", want, body)
+		}
+	}
+}
+
+// The report is a VIEW of the run: it reads the transcript and never re-runs or re-judges. It also
+// exits 0 whatever the run's verdict was -- a CI step that renders the account of a failure must
+// not itself fail for having rendered it.
+func TestReportReadsTheRunAndExitsZeroOnAFailedOne(t *testing.T) {
+	ti, flags := gateFixture(t, "event_set_outcome gate_fail\nexit 1\n", cleanCase)
+	writeCase(t, ti, "a.case", "active")
+
+	if code, _, _ := runReal(t, append(flags, "gate", "run", "-p", "default-latest")...); code != exitcode.GateFail {
+		t.Fatalf("the fixture run should have failed with 10, got %v", code)
+	}
+	code, out, e := runReal(t, append(flags, "report")...)
+	if code != exitcode.OK {
+		t.Fatalf("report on a failed run returned %v (%s)", code, e)
+	}
+	if !strings.Contains(out, "exit 10") {
+		t.Errorf("report does not carry the run's own verdict:\n%s", out)
+	}
+}
+
+// With no --run-id the newest run is the one meant. Getting the order backwards would silently
+// report on the oldest run on the machine, which on a CI box is months old.
+func TestReportDefaultsToTheNewestRun(t *testing.T) {
+	ti, flags := gateFixture(t, cleanGate, cleanCase)
+	writeCase(t, ti, "a.case", "active")
+	_, first, _ := runReal(t, append([]string{"--output", "json"},
+		append(flags, "gate", "run", "-p", "default-latest")...)...)
+	_, second, _ := runReal(t, append([]string{"--output", "json"},
+		append(flags, "gate", "run", "-p", "default-latest")...)...)
+
+	var a, b GateDoc
+	_ = json.Unmarshal([]byte(first), &a)
+	_ = json.Unmarshal([]byte(second), &b)
+	if a.RunID == b.RunID {
+		t.Fatal("the two runs share an id")
+	}
+	_, out, _ := runReal(t, append(flags, "report")...)
+	if !strings.Contains(out, b.RunID) {
+		t.Errorf("report picked %q, want the newer run %s", out, b.RunID)
+	}
+	_ = ti
+}

@@ -48,7 +48,7 @@ func TestRealTableRegistersOnlyImplementedCommands(t *testing.T) {
 	// so they are subcommands rather than top-level entries.
 	want := map[string]bool{
 		"config": true, "profile": true, "doctor": true,
-		"case": true, "cluster": true, "gate": true, "fuzz": true,
+		"case": true, "cluster": true, "gate": true, "fuzz": true, "report": true,
 	}
 	for name := range commands {
 		if !want[name] {
