@@ -102,7 +102,7 @@ shift $((OPTIND - 1))
 
 CASE_PATH="${1:-}"
 [[ -z "$CASE_PATH" ]] && { echo "ERROR: <case> path is required. -h for help." >&2; exit 2; }
-[[ -f "$CASE_PATH" ]] || { echo "ERROR: case not found: $CASE_PATH" >&2; exit 1; }
+[[ -f "$CASE_PATH" ]] || { echo "ERROR: case not found: $CASE_PATH" >&2; exit 2; }
 
 # case_parse <path> — parse the [case] section into CASE_PROFILE / CASE_INPUT /
 # CASE_EXPECT_ORACLE. Deliberately a plain-variable parse (not associative-array-based like
@@ -166,15 +166,15 @@ _run_case_resolve_profile() {
     return 0
 }
 
-[[ -z "$CASE_PROFILE" ]] && { echo "ERROR: $CASE_PATH: [case] profile= is required" >&2; exit 1; }
-[[ -z "$CASE_INPUT" ]] && { echo "ERROR: $CASE_PATH: [case] input= is required" >&2; exit 1; }
-[[ -z "$CASE_EXPECT_ORACLE" ]] && { echo "ERROR: $CASE_PATH: [case] expect_oracle= is required" >&2; exit 1; }
+[[ -z "$CASE_PROFILE" ]] && { echo "ERROR: $CASE_PATH: [case] profile= is required" >&2; exit 2; }
+[[ -z "$CASE_INPUT" ]] && { echo "ERROR: $CASE_PATH: [case] input= is required" >&2; exit 2; }
+[[ -z "$CASE_EXPECT_ORACLE" ]] && { echo "ERROR: $CASE_PATH: [case] expect_oracle= is required" >&2; exit 2; }
 
 case "$CASE_EXPECT_ORACLE" in
     pass|reject) ;;
     *)
         echo "ERROR: $CASE_PATH: expect_oracle '$CASE_EXPECT_ORACLE' unknown — expected one of: pass reject" >&2
-        exit 1
+        exit 2
         ;;
 esac
 
@@ -225,7 +225,7 @@ CASE_PROFILE="$(_run_case_resolve_profile "$CASE_PROFILE" "$(dirname "$CASE_PATH
 [[ -f "$CASE_PROFILE" ]] || { echo "ERROR: $CASE_PATH: profile not found: $CASE_PROFILE" >&2; exit 2; }
 
 APPLY_PROFILE="$SCRIPT_DIR/apply_profile.sh"
-[[ -f "$APPLY_PROFILE" ]] || { echo "ERROR: apply_profile.sh not found at $APPLY_PROFILE" >&2; exit 1; }
+[[ -f "$APPLY_PROFILE" ]] || { event_set_outcome infra_error; echo "ERROR: apply_profile.sh not found at $APPLY_PROFILE" >&2; exit 1; }
 
 echo ">> [1/3] apply_profile (needs live chain): bringing up cluster for $CASE_PROFILE"
 bash "$APPLY_PROFILE" -p "$CASE_PROFILE" -o "$CLUSTER_OUTDIR"
@@ -240,6 +240,7 @@ NODE_DIR="$CLUSTER_OUTDIR_ABS/127.0.0.1"
 # lines), so profile_lib.sh/profile_load are deliberately NOT sourced here.
 source "$SCRIPT_DIR/oracle_lib.sh"
 RPC_URL="$(_primary_web3_url "$NODE_DIR")" || {
+    event_set_outcome infra_error
     echo "ERROR: run_case: could not derive the primary Web3 RPC URL from $NODE_DIR/node0/config.ini" >&2
     exit 1
 }
@@ -248,6 +249,7 @@ RPC_URL="$(_primary_web3_url "$NODE_DIR")" || {
 # assumption about cluster_up.sh's process-launch layout this relies on).
 mapfile -t node_pids < <(pgrep -f "$NODE_DIR/" 2>/dev/null || true)
 if [[ ${#node_pids[@]} -eq 0 ]]; then
+    event_set_outcome infra_error
     echo "ERROR: could not discover any live fisco-bcos node PIDs under $NODE_DIR — apply_profile.sh may not have brought up a chain." >&2
     exit 1
 fi
@@ -294,6 +296,7 @@ else
         # infrastructure failure, not a case verdict — case_verdict has no way to say "the
         # stateroot oracle was never meaningfully consulted", so this exits directly instead of
         # folding it into stateroot_tripped and reporting a misleading CASE: FAIL.
+        event_set_outcome infra_error
         echo "ERROR: run_case: stateroot: <2 node RPCs discovered under $NODE_DIR — infrastructure failure, refusing to judge $CASE_PATH" >&2
         bash "$NODE_DIR/stop_all.sh" || true
         exit 1
@@ -304,9 +307,15 @@ fi
 
 bash "$NODE_DIR/stop_all.sh" || true
 
+# Name the outcome at BOTH verdict points. Without this the rc fallback maps a failing case to
+# engine_error -> exit 40, "fbt has a bug", for a replay that did exactly its job: a fixture that
+# reproduced a real chain crash reported the HOST as broken. A case failing is a RESULT (10), the
+# same as a scenario failing -- that distinction is the whole reason the exit codes exist.
 if case_verdict "$CASE_EXPECT_ORACLE" "$input_rc" "$crash_tripped" "$liveness_tripped" "$stateroot_tripped"; then
+    event_set_outcome pass
     echo "CASE: PASS ($CASE_PATH)"
 else
+    event_set_outcome gate_fail
     echo "CASE: FAIL ($CASE_PATH — expect_oracle=$CASE_EXPECT_ORACLE input_rc=$input_rc crash_tripped=$crash_tripped liveness_tripped=$liveness_tripped stateroot_tripped=$stateroot_tripped)"
     exit 1
 fi

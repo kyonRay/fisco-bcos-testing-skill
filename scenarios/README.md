@@ -57,6 +57,13 @@ expect_oracle = pass
   verbatim via `bash -c`, with its exit status captured (never allowed to abort `run_case.sh`
   itself — a nonzero exit is exactly what `expect_oracle=reject` expects); `run_case.sh` does not
   otherwise validate or sandbox it.
+
+  **Write the RPC endpoint as `$BCOS_RPC_URL` / `$WEB3_RPC_URL`, never as a literal
+  `http://127.0.0.1:20200`.** `bash -c` inherits the engine's environment, and the host exports
+  both from the resolved configuration, so a fixture written that way replays on whatever ports
+  the cluster actually got. A hardcoded URL replays against whatever happens to be listening on
+  the default port — which, on a machine already running a chain, is a different chain that
+  answers.
 - `expect_oracle` — one of `pass` or `reject`. This is a release gate whose job is "confirm no
   exceptions": a crash / consensus-halt / state-mismatch oracle trip (`scripts/oracle_crash.sh`,
   `scripts/oracle_liveness.sh`, `scripts/oracle_stateroot.sh`; see `scripts/gate.sh`) is **always**
