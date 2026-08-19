@@ -23,6 +23,10 @@ type Workspace struct {
 	Root     string // <state>/runs/<run_id>
 	Cluster  string // the engine builds its chain here (passed as -o)
 	Evidence string // node logs, tampered payloads, anything a human needs after a trip
+	// Events is this run's durable transcript, one normalized event per line. It is what `fbt
+	// report` reads: without it a finished run leaves nothing behind but whatever the terminal
+	// scrolled past.
+	Events string
 	// Failures is where failures_lib.sh actually appends, which is inside the CLUSTER directory,
 	// not beside it: gate.sh sets FAILURES_OUTDIR to the cluster outdir so a run's defect rows
 	// travel with the node directories they refer to. This field mirrors the engine rather than
@@ -118,6 +122,7 @@ func Layout(stateDir, runID string) (Workspace, error) {
 		Root:     root,
 		Cluster:  filepath.Join(root, "cluster"),
 		Evidence: filepath.Join(root, "evidence"),
+		Events:   filepath.Join(root, "events.jsonl"),
 		Failures: filepath.Join(root, "cluster", "failures.jsonl"),
 	}, nil
 }

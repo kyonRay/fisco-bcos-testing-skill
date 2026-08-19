@@ -113,6 +113,7 @@ func clusterUp(ctx context.Context, o GlobalOptions, args []string, stdout, stde
 	})
 	code := rt.Agg.Result()
 	rt.Exec.Finish(code)
+	rt.finish() // close the run transcript after the last event
 
 	// Record which processes the cluster actually started. Registering with no nodes leaves the
 	// entry permanently "unknown": it can never be seen as active, never found stale, and never

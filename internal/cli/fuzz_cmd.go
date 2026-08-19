@@ -175,6 +175,7 @@ func finishRun(rt *runtime, res execution.Result, name string, stdout, stderr io
 	code := rt.Agg.Result()
 	if rt.Norm.RunID != "" {
 		rt.Exec.Finish(code)
+		rt.finish() // close the run transcript after the last event
 	}
 	doc := runDoc{
 		Exit: code.Int(), RunID: rt.Norm.RunID, Command: name,

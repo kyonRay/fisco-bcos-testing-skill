@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"strconv"
@@ -49,6 +50,8 @@ type runtime struct {
 
 	events []events.Event
 	stream io.Writer // non-nil in --output jsonl: events go out as they happen
+	// eventFile is the run's durable transcript at <workspace>/events.jsonl, opened by begin.
+	eventFile *os.File
 }
 
 // newRuntime resolves configuration and the engine. It creates nothing on disk.
@@ -146,12 +149,35 @@ func (rt *runtime) begin(extra map[string]interface{}) error {
 	}
 	rt.Workspace = ws
 	rt.Norm.RunID = id
+
+	// The run's own copy of its event stream. Until this existed a round's entire record lived in
+	// memory and evaporated when the process exited -- unless the operator happened to have chosen
+	// --output jsonl AND redirected it somewhere. A gate round that takes four minutes and builds a
+	// chain deserves a durable account of itself, and `fbt report` has nothing to read without one.
+	//
+	// Failing to open it is not fatal. The run is the point; losing its transcript is worse than
+	// not having one, but refusing to test a release candidate because a log file would not open is
+	// worse still.
+	if f, err := os.OpenFile(ws.Events, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
+		rt.eventFile = f
+	} else if rt.Exec.Log != nil {
+		fmt.Fprintf(rt.Exec.Log, "fbt: cannot record events to %s: %v\n", ws.Events, err)
+	}
+
 	if extra == nil {
 		extra = map[string]interface{}{}
 	}
 	extra["workspace"] = ws.Root
 	rt.Exec.Start(id, extra)
 	return nil
+}
+
+// finish closes the run's transcript. Commands call it after the last event.
+func (rt *runtime) finish() {
+	if rt.eventFile != nil {
+		_ = rt.eventFile.Close()
+		rt.eventFile = nil
+	}
 }
 
 // fail reports an error with this run's workspace attached, when there is one. Commands that have
@@ -166,6 +192,11 @@ func (rt *runtime) record(e events.Event) {
 	rt.events = append(rt.events, e)
 	if rt.stream != nil {
 		enc := json.NewEncoder(rt.stream)
+		enc.SetEscapeHTML(false)
+		_ = enc.Encode(e)
+	}
+	if rt.eventFile != nil {
+		enc := json.NewEncoder(rt.eventFile)
 		enc.SetEscapeHTML(false)
 		_ = enc.Encode(e)
 	}

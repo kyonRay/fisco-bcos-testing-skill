@@ -65,6 +65,9 @@ FBT_ENGINE_SCRIPTS="$ENG" FBT_PROFILE_DIR="$WORK/profiles" RG_ONCE_WAIT_SEC=1 \
 
 ev="$(cat "$WORK/events.jsonl" 2>/dev/null || true)"
 assert_contains "$(cat "$WORK/out")" "CASE: FAIL" "the case really did fail (see $WORK/out)"
+assert_contains "$ev" '"ev":"case_replayed"' \
+    "the replay reports itself as a stage, so it lands in the run's evidence matrix"
+assert_contains "$ev" '"result":"fail"' "...carrying the verdict it reached"
 assert_contains "$ev" '"outcome":"gate_fail"' \
     "a failing case is gate_fail (10, the chain failed), not engine_error (40, fbt is broken)"
 assert_not_contains "$ev" '"outcome":"engine_error"' \

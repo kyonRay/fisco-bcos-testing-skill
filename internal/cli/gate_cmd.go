@@ -195,6 +195,7 @@ func gateRun(ctx context.Context, o GlobalOptions, args []string, stdout, stderr
 
 	code := rt.Agg.Result()
 	rt.Exec.Finish(code)
+	rt.finish() // close the run transcript after the last event
 
 	// The report is derived from the normalized event stream, not assembled alongside it. A second
 	// source of truth here is how a summary comes to disagree with the events it summarizes.

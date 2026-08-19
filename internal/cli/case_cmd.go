@@ -196,6 +196,7 @@ func caseRun(ctx context.Context, o GlobalOptions, args []string, stdout, stderr
 	})
 	code := rt.Agg.Result()
 	rt.Exec.Finish(code)
+	rt.finish() // close the run transcript after the last event
 
 	doc := caseRunDoc{
 		Exit: code.Int(), RunID: rt.Norm.RunID, Case: c.Name,

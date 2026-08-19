@@ -334,10 +334,15 @@ bash "$NODE_DIR/stop_all.sh" || true
 # engine_error -> exit 40, "fbt has a bug", for a replay that did exactly its job: a fixture that
 # reproduced a real chain crash reported the HOST as broken. A case failing is a RESULT (10), the
 # same as a scenario failing -- that distinction is the whole reason the exit codes exist.
+# case_replayed is what puts this replay in the run's evidence matrix. gate.sh's sweep emits it for
+# every fixture it runs; a standalone `fbt case run` emitted nothing, so `fbt report` could show the
+# exit code and the defects but not WHICH fixture produced them.
 if case_verdict "$CASE_EXPECT_ORACLE" "$input_rc" "$crash_tripped" "$liveness_tripped" "$stateroot_tripped"; then
+    emit_event case_replayed file "$(basename "$CASE_PATH")" result "pass"
     event_set_outcome pass
     echo "CASE: PASS ($CASE_PATH)"
 else
+    emit_event case_replayed file "$(basename "$CASE_PATH")" result "fail"
     event_set_outcome gate_fail
     echo "CASE: FAIL ($CASE_PATH — expect_oracle=$CASE_EXPECT_ORACLE input_rc=$input_rc crash_tripped=$crash_tripped liveness_tripped=$liveness_tripped stateroot_tripped=$stateroot_tripped)"
     exit 1
